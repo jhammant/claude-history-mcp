@@ -1,0 +1,31 @@
+{
+  "name": "claude-history-mcp",
+  "version": "0.2.0",
+  "description": "MCP server for searching Claude Code conversation history with cloud sync and federated learning",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "claude-history-mcp": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/index.ts",
+    "start": "node dist/index.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "build-index": "tsx src/cli/build-index.ts",
+    "install-hook": "tsx src/cli/install.ts",
+    "federation": "tsx src/cli/federation.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "msgpackr": "^1.11.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "vitest": "^2.1.0"
+  }
+}

@@ -1,0 +1,1 @@
+{"version":3,"file":"get-session-summary.d.ts","sourceRoot":"","sources":["../../src/tools/get-session-summary.ts"],"names":[],"mappings":"AAaA,eAAO,MAAM,qBAAqB;;;;;;;;;;;;;;;;CAkBjC,CAAC;AAEF,wBAAgB,uBAAuB,CAAC,IAAI,EAAE;IAC5C,UAAU,CAAC,EAAE,MAAM,CAAC;IACpB,OAAO,CAAC,EAAE,MAAM,CAAC;CAClB,GAAG,MAAM,CAoBT"}
