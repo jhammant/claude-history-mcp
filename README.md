@@ -1,12 +1,18 @@
 # ClaudeHistory MCP
 
-> Give Claude Code a memory. Search your conversation history, find past solutions, and let your team learn together.
+> Give Claude Code a memory that persists between sessions.
 
 **100% local by default. Your data never leaves your machine.**
 
-## Quick Start (30 seconds)
+## The Problem
 
-Add to your Claude Code config (`~/.claude/settings.json`):
+Claude Code starts every session with amnesia. Fixed a gnarly bug last week? Claude has no idea. Made an architectural decision last month? Gone.
+
+ClaudeHistory fixes this by indexing your existing conversation transcripts and making them searchable.
+
+## Install (30 seconds)
+
+Add to `~/.claude/settings.json`:
 
 ```json
 {
@@ -19,108 +25,112 @@ Add to your Claude Code config (`~/.claude/settings.json`):
 }
 ```
 
-Restart Claude Code. Done. Your past sessions are now searchable.
+Restart Claude Code. Done.
 
-## What It Does
+## How It Works
 
-Claude Code stores full conversation transcripts as JSONL files in `~/.claude/projects/`. This MCP server indexes them and provides 7 tools:
+```
+~/.claude/projects/          ClaudeHistory MCP           Claude Code
+┌─────────────────┐        ┌──────────────────┐        ┌──────────┐
+│ Session JSONL    │───────▶│ Index + Search    │◀──────▶│ 7 Tools  │
+│ files (already   │  read  │ BM25 + TF-IDF    │ query  │ available│
+│ on your disk)    │  only  │ Knowledge Extract │        │ to Claude│
+└─────────────────┘        └──────────────────┘        └──────────┘
+                                    │
+                           (optional, off by default)
+                                    │
+                                    ▼
+                           ┌──────────────────┐
+                           │ Cloud Sync Server │
+                           │ (self-host or     │
+                           │  hosted version)  │
+                           └──────────────────┘
+```
 
-| Tool | Purpose |
-|------|---------|
-| `search_history` | Full-text search across all conversations with filter syntax |
-| `find_solutions` | Find how you fixed errors/problems before |
-| `get_session_summary` | Structured summary of any session |
-| `list_projects` | List all projects with session counts and dates |
-| `find_patterns` | Discover recurring topics, workflows, and issues |
-| `get_project_context` | Full project context (recent sessions, decisions, knowledge) |
-| `search_community_knowledge` | Search community-shared patterns via federated learning |
+**Step 1:** Claude Code already saves every conversation as JSONL files in `~/.claude/projects/`. You have these right now.
 
-## Features
+**Step 2:** ClaudeHistory reads these files and builds a search index. Pure heuristics — BM25 ranking, TF-IDF scoring, Reciprocal Rank Fusion. No LLM calls. No API keys needed.
 
-### 🔍 Hybrid Search
-BM25 + TF-IDF with Reciprocal Rank Fusion. Filter by project, date, tool usage.
+**Step 3:** Claude Code can now search your history using 7 MCP tools automatically.
 
-### 🧠 Knowledge Extraction
-Automatically extracts decisions, solutions, and error→fix patterns from your sessions.
+**Step 4 (optional):** Enable cloud sync to share knowledge across devices or with your team. Only extracted patterns sync — never raw transcripts or source code.
 
-### ⚡ Proactive Context
-Session-start hook injects relevant project history into new sessions automatically.
+## What Claude Can Do With It
 
-### ☁️ Cloud Sync (Optional)
-Sync knowledge across devices. Share learnings within your team. Self-host or use our hosted version.
+| Tool | What It Does | Example |
+|------|-------------|---------|
+| `search_history` | Full-text search with filters | `"docker error project:myapp after:7d"` |
+| `find_solutions` | Find past fixes for similar problems | `"ECONNREFUSED port conflict"` |
+| `find_patterns` | Discover recurring issues across projects | Shows you keep hitting the same bugs |
+| `get_session_summary` | Summarise any past session | Quick context on what happened |
+| `list_projects` | See all projects with session counts | Overview of your work |
+| `get_project_context` | Full context for a project | Recent decisions, solutions, patterns |
+| `search_community_knowledge` | Search shared patterns (opt-in) | What other devs do for similar problems |
 
-### 🌐 Federated Learning (Optional)
-Opt-in anonymous pattern sharing. Your Claude learns from the community without exposing your code.
+## Learnings System
 
-## Cloud Sync
+The coolest part: ClaudeHistory automatically clusters similar solutions across your projects.
 
-By default, everything stays local. To enable cloud sync:
+**Before:** You hit the same Docker port conflict 3 times across 2 projects, fixing from scratch each time.
+
+**After:** Claude starts the session already knowing "Check port conflicts first when ECONNREFUSED — seen 3 times across 2 projects."
+
+It uses Jaccard similarity on stemmed words, scored by frequency, cross-session spread, and cross-project reach. High-scoring clusters become "learnings" that surface automatically.
+
+## Cloud Sync (Optional)
+
+Everything is local by default. Zero network calls.
+
+To sync knowledge across devices or share within your team, add a server:
 
 ```bash
-# Self-host (free)
+# Self-host for free (AGPL)
 git clone https://github.com/jhammant/claude-history-cloud
-cd claude-history-cloud
 docker compose up -d
-
-# Or use our hosted version
-# Sign up at claudehistory.com (coming soon)
 ```
 
-Then set environment variables:
+Then tell the MCP where to sync:
 
 ```bash
-export CLAUDE_HISTORY_API_URL=http://localhost:3000  # or https://api.claudehistory.com
+export CLAUDE_HISTORY_API_URL=http://localhost:3000
 export CLAUDE_HISTORY_API_KEY=your-api-key
-export CLAUDE_HISTORY_TEAM_ID=optional-team-id
 ```
 
-## Federation
+**What syncs:** Extracted patterns only — decisions, solutions, error→fix mappings.
+**What never syncs:** Raw conversation transcripts, source code, file contents.
 
-Opt-in anonymous knowledge sharing:
+### Three Layers of Knowledge
 
-```bash
-claude-history-mcp federation enable
-claude-history-mcp federation status
-```
+| Layer | Priority | What | Privacy |
+|-------|----------|------|---------|
+| 🟢 Your Memory | 1.0× (highest) | Your own sessions | Always local |
+| 🔵 Team Knowledge | 0.7× | Your team's shared patterns | E2E encrypted, opt-in |
+| 🟣 Community Patterns | 0.4× | Anonymous patterns from other devs | Differential privacy, k-anonymity, opt-in |
 
-See [README-FEDERATION.md](./README-FEDERATION.md) for full details.
+Your own memory always ranks first. Team fills gaps. Community validates patterns.
 
 ## Privacy & Security
 
 - **Local by default** — no network calls unless you configure cloud sync
-- **Cloud sync is E2E encrypted** — server cannot read team data
-- **Federation uses differential privacy** — patterns are anonymous, k-anonymity enforced
-- **Source code never leaves your machine** — only extracted patterns (decisions, solutions) sync
-- **Full audit trail** — see exactly what was shared in `~/.claude-history-mcp/audit/`
+- **No LLM calls** — pure heuristic search (BM25 + TF-IDF)
+- **Source code never leaves your machine** — only structured patterns sync
+- **Cloud sync is E2E encrypted**
+- **Federation uses differential privacy** with k-anonymity (3+ contributors)
+- **Full audit trail** at `~/.claude-history-mcp/audit/`
 
-## Architecture
+## Performance
 
-```text
-┌──────────────────────────────────────────────────────┐
-│                  ClaudeHistoryMCP                     │
-├──────────────┬───────────────┬───────────────────────┤
-│  MCP Server  │  /claude-history  │  SessionStart Hook │
-│  (7 tools)   │  Skill            │  (auto-context)    │
-├──────────────┴───────────────┴───────────────────────┤
-│              Hybrid Search Engine                     │
-│          BM25 (keywords) + TF-IDF (semantic)         │
-├──────────────────────────────────────────────────────┤
-│  Indexing Pipeline  │  Knowledge Layer  │  Summaries  │
-├──────────────────────────────────────────────────────┤
-│  JSONL Parsers  │  File Watcher  │  Document Store    │
-└──────────────────────────────────────────────────────┘
-         ↕                    ↕
-~/.claude/history.jsonl    ~/.claude/projects/*/*.jsonl
-```
+- Indexes ~170 sessions in ~9 seconds
+- Searches complete in <200ms
+- 2 runtime dependencies
+- Zero config required
 
-## Self-Hosting the Server
+## Links
 
-See [claude-history-cloud](https://github.com/jhammant/claude-history-cloud) for the full server.
-
-```bash
-docker compose up -d  # PostgreSQL + API server
-```
+- **MCP Client (this repo):** MIT license — use it however you want
+- **Cloud Server:** [github.com/jhammant/claude-history-cloud](https://github.com/jhammant/claude-history-cloud) (AGPL)
+- **npm:** `npm i claude-history-mcp`
 
 ## License
 
-MIT — use it however you want.
+MIT
