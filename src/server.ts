@@ -12,6 +12,8 @@ import { handleFindSolutions } from "./tools/find-solutions.js";
 import { handleGetSessionSummary } from "./tools/get-session-summary.js";
 import { handleGetProjectContext } from "./tools/get-project-context.js";
 import { handleFindPatterns } from "./tools/find-patterns.js";
+import { IncrementalIndexer } from "./watcher/incremental-indexer.js";
+import { KnowledgeStore } from "./knowledge/knowledge-store.js";
 
 export function createServer(): {
   server: McpServer;
@@ -28,6 +30,10 @@ export function createServer(): {
 
   const indexManager = new IndexManager();
   const searchEngine = new SearchEngine(indexManager);
+  const knowledgeStore = new KnowledgeStore();
+  knowledgeStore.load();
+  const indexer = new IncrementalIndexer(indexManager, knowledgeStore);
+  server.server.onclose = () => indexer.stop();
   let initialized = false;
 
   async function ensureIndex(): Promise<void> {
@@ -35,12 +41,18 @@ export function createServer(): {
 
     const loaded = await indexManager.load();
     if (loaded) {
-      indexManager.incrementalUpdate().catch(() => {});
+      // incrementalUpdate has no internal awaits — its synchronous CPU work
+      // would block the event loop and stall the response over stdio.
+      // Defer with setImmediate so the current tool response can be sent first.
+      setImmediate(() => {
+        indexManager.incrementalUpdate().catch(() => {});
+      });
     } else {
       await indexManager.buildFullIndex();
       await indexManager.save().catch(() => {});
     }
     initialized = true;
+    indexer.start();
   }
 
   // Register tools

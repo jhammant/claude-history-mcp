@@ -8,6 +8,13 @@ export const CONFIG = {
     get projectsDir() {
         return join(this.claudeDir, "projects");
     },
+    get codexProjectsDir() {
+        return join(process.env.CODEX_TRANSCRIPT_FEED ||
+            join(process.env.CODEX_HOME || join(homedir(), ".codex"), "transcript-feed"), "projects");
+    },
+    get projectRoots() {
+        return [this.projectsDir, this.codexProjectsDir];
+    },
     get settingsFile() {
         return join(this.claudeDir, "settings.json");
     },

@@ -1,7 +1,4 @@
-import { existsSync, readdirSync } from "fs";
-import { join } from "path";
-import { CONFIG } from "../config.js";
-import { parseSessionFile, } from "../parsers/session-parser.js";
+import { parseSessionFile, enumerateSessionFiles, } from "../parsers/session-parser.js";
 import { parseHistoryFile, groupBySession, } from "../parsers/history-parser.js";
 import { extractProjectName } from "../utils/path-encoder.js";
 export const getSessionSummaryTool = {
@@ -40,14 +37,9 @@ export function handleGetSessionSummary(args) {
     return formatSessionSummary(session);
 }
 function findSessionById(sessionId) {
-    const projectsDir = CONFIG.projectsDir;
-    if (!existsSync(projectsDir))
-        return null;
-    for (const projectDir of readdirSync(projectsDir)) {
-        const filePath = join(projectsDir, projectDir, `${sessionId}.jsonl`);
-        if (existsSync(filePath)) {
-            return parseSessionFile(filePath, projectDir);
-        }
+    for (const file of enumerateSessionFiles()) {
+        if (file.sessionId === sessionId)
+            return parseSessionFile(file.filePath, file.projectDir);
     }
     return null;
 }

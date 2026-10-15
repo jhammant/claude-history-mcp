@@ -184,7 +184,7 @@ export class IndexManager {
         // Split if too long
         const words = currentText.split(/\s+/);
         for (let i = 0; i < words.length; i += chunkSize) {
-          if (chunks.length >= maxChunksPerSession) return;
+          if (chunks.length >= maxChunksPerSession) break;
           chunks.push({
             text: words.slice(i, i + chunkSize).join(" "),
             role: currentRole,
@@ -200,6 +200,7 @@ export class IndexManager {
     };
 
     for (let i = 0; i < session.messages.length; i++) {
+      if (chunks.length >= maxChunksPerSession) break;
       const msg = session.messages[i];
 
       // Group user+assistant exchanges together for better context

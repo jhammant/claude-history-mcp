@@ -4,9 +4,10 @@
  */
 export type FileChangeCallback = (filePath: string) => void;
 export declare class FileWatcher {
-    private watcher;
+    private watchers;
     private debounceTimers;
     private debounceMs;
+    private polling;
     constructor(debounceMs?: 5000);
     /**
      * Start watching the projects directory.

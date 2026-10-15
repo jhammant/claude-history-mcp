@@ -2,6 +2,8 @@ export declare const CONFIG: {
     readonly claudeDir: string;
     readonly historyFile: string;
     readonly projectsDir: string;
+    readonly codexProjectsDir: string;
+    readonly projectRoots: string[];
     readonly settingsFile: string;
     readonly dataDir: string;
     readonly indexFile: string;

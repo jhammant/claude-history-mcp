@@ -113,39 +113,40 @@ export function parseSessionFile(filePath, projectDir) {
  * Enumerate all session JSONL files across all projects.
  */
 export function enumerateSessionFiles() {
-    const projectsDir = CONFIG.projectsDir;
-    if (!existsSync(projectsDir))
-        return [];
     const results = [];
-    for (const projectDir of readdirSync(projectsDir)) {
-        const projectPath = join(projectsDir, projectDir);
-        let stat;
-        try {
-            stat = statSync(projectPath);
-        }
-        catch {
+    for (const projectsDir of CONFIG.projectRoots) {
+        if (!existsSync(projectsDir))
             continue;
-        }
-        if (!stat.isDirectory())
-            continue;
-        for (const file of readdirSync(projectPath)) {
-            if (!file.endsWith(".jsonl"))
-                continue;
-            const filePath = join(projectPath, file);
+        for (const projectDir of readdirSync(projectsDir)) {
+            const projectPath = join(projectsDir, projectDir);
+            let stat;
             try {
-                const fstat = statSync(filePath);
-                if (!fstat.isFile())
-                    continue;
-                results.push({
-                    filePath,
-                    projectDir,
-                    sessionId: basename(file, ".jsonl"),
-                    mtime: fstat.mtimeMs,
-                    size: fstat.size,
-                });
+                stat = statSync(projectPath);
             }
             catch {
                 continue;
+            }
+            if (!stat.isDirectory())
+                continue;
+            for (const file of readdirSync(projectPath)) {
+                if (!file.endsWith(".jsonl"))
+                    continue;
+                const filePath = join(projectPath, file);
+                try {
+                    const fstat = statSync(filePath);
+                    if (!fstat.isFile())
+                        continue;
+                    results.push({
+                        filePath,
+                        projectDir,
+                        sessionId: basename(file, ".jsonl"),
+                        mtime: fstat.mtimeMs,
+                        size: fstat.size,
+                    });
+                }
+                catch {
+                    continue;
+                }
             }
         }
     }

@@ -3,7 +3,7 @@
  * Integrates with file watcher and knowledge extraction.
  */
 
-import { join } from "path";
+import { basename, dirname } from "path";
 import { statSync } from "fs";
 import { CONFIG } from "../config.js";
 import { IndexManager } from "../indexing/index-manager.js";
@@ -46,12 +46,8 @@ export class IncrementalIndexer {
     this.processing.add(filename);
 
     try {
-      // filename is relative like: -Users-jon-dev-ghostty/sessionId.jsonl
-      const parts = filename.split("/");
-      if (parts.length < 2) return;
-
-      const projectDir = parts[0];
-      const filePath = join(CONFIG.projectsDir, filename);
+      const projectDir = basename(dirname(filename));
+      const filePath = filename;
 
       let stat;
       try {
@@ -60,12 +56,8 @@ export class IncrementalIndexer {
         return;
       }
 
-      // Check if file hasn't been modified recently (session likely ended)
-      const ageMinutes = (Date.now() - stat.mtimeMs) / 60000;
-      if (ageMinutes < CONFIG.watcher.staleSessionMinutes) {
-        // Still active, skip for now
-        return;
-      }
+      // The watcher already debounces writes. A five-minute freshness veto
+      // permanently lost final updates because it never scheduled a retry.
 
       // Re-index this file
       await this.indexManager.incrementalUpdate();

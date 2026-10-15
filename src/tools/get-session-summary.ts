@@ -3,6 +3,7 @@ import { join } from "path";
 import { CONFIG } from "../config.js";
 import {
   parseSessionFile,
+  enumerateSessionFiles,
   type ParsedSession,
 } from "../parsers/session-parser.js";
 import {
@@ -57,14 +58,8 @@ export function handleGetSessionSummary(args: {
 }
 
 function findSessionById(sessionId: string): ParsedSession | null {
-  const projectsDir = CONFIG.projectsDir;
-  if (!existsSync(projectsDir)) return null;
-
-  for (const projectDir of readdirSync(projectsDir)) {
-    const filePath = join(projectsDir, projectDir, `${sessionId}.jsonl`);
-    if (existsSync(filePath)) {
-      return parseSessionFile(filePath, projectDir);
-    }
+  for (const file of enumerateSessionFiles()) {
+    if (file.sessionId === sessionId) return parseSessionFile(file.filePath, file.projectDir);
   }
   return null;
 }

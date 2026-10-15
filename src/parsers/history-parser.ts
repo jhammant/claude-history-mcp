@@ -5,6 +5,7 @@
 
 import { readFileSync, existsSync } from "fs";
 import { CONFIG } from "../config.js";
+import { enumerateSessionFiles, parseSessionFile } from "./session-parser.js";
 
 export interface HistoryEntry {
   display: string;
@@ -19,10 +20,9 @@ export interface HistoryEntry {
  */
 export function parseHistoryFile(): HistoryEntry[] {
   const filePath = CONFIG.historyFile;
-  if (!existsSync(filePath)) return [];
 
   const entries: HistoryEntry[] = [];
-  const content = readFileSync(filePath, "utf-8");
+  const content = existsSync(filePath) ? readFileSync(filePath, "utf-8") : "";
 
   for (const line of content.split("\n")) {
     if (!line.trim()) continue;
@@ -41,6 +41,16 @@ export function parseHistoryFile(): HistoryEntry[] {
     }
   }
 
+  for (const file of enumerateSessionFiles()) {
+    if (!file.sessionId.startsWith("codex-")) continue;
+    const session = parseSessionFile(file.filePath, file.projectDir);
+    if (!session) continue;
+    for (const message of session.messages) {
+      if (message.role !== "user") continue;
+      entries.push({ display: message.text, timestamp: Date.parse(message.timestamp) || 0,
+        project: session.cwd, sessionId: session.sessionId });
+    }
+  }
   return entries;
 }
 
