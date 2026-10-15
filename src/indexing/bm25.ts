@@ -61,7 +61,7 @@ export class BM25Index {
   /**
    * Remove a document from the index.
    */
-  removeDocument(docId: number): void {
+  removeDocument(docId: number, terms?: Iterable<string>): void {
     const docLength = this.docLengths.get(docId);
     if (docLength === undefined) return;
 
@@ -69,8 +69,12 @@ export class BM25Index {
     this.totalDocs--;
     this.totalLength -= docLength;
 
-    // Remove from inverted index
-    for (const [term, postings] of this.invertedIndex) {
+    // Remove from inverted index. Given the document's terms, only their postings are
+    // touched; without them every term is scanned, which on a large history is millions
+    // of array copies per document.
+    for (const term of terms ?? [...this.invertedIndex.keys()]) {
+      const postings = this.invertedIndex.get(term);
+      if (!postings) continue;
       const filtered = postings.filter((p) => p.docId !== docId);
       if (filtered.length === 0) {
         this.invertedIndex.delete(term);

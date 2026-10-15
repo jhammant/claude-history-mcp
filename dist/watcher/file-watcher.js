@@ -6,30 +6,25 @@ import { watch, existsSync } from "fs";
 import { CONFIG } from "../config.js";
 import { join } from "path";
 import { enumerateSessionFiles } from "../parsers/session-parser.js";
+const FAST_POLL_MS = 5_000;
+const SAFETY_POLL_MS = 60_000;
 export class FileWatcher {
     watchers = [];
     debounceTimers = new Map();
     debounceMs;
+    safetyPollMs;
     polling = null;
-    constructor(debounceMs = CONFIG.watcher.debounceMs) {
+    known = null;
+    constructor(debounceMs = CONFIG.watcher.debounceMs, safetyPollMs = SAFETY_POLL_MS) {
         this.debounceMs = debounceMs;
+        this.safetyPollMs = safetyPollMs;
     }
     /**
      * Start watching the projects directory.
      */
     start(onChange) {
         this.stop();
-        // Also covers newly created roots and unavailable/exhausted native watchers.
-        const known = new Map(enumerateSessionFiles().map(f => [f.filePath, `${f.mtime}:${f.size}`]));
-        this.polling = setInterval(() => {
-            for (const f of enumerateSessionFiles()) {
-                const signature = `${f.mtime}:${f.size}`;
-                if (known.get(f.filePath) !== signature)
-                    onChange(f.filePath);
-                known.set(f.filePath, signature);
-            }
-        }, Math.max(this.debounceMs, 5000));
-        this.polling.unref();
+        let native = 0;
         for (const projectsDir of CONFIG.projectRoots) {
             if (!existsSync(projectsDir))
                 continue;
@@ -48,12 +43,32 @@ export class FileWatcher {
                     }, this.debounceMs));
                 }).on('error', error => {
                     console.error('History native watcher unavailable; polling remains active:', error.message);
+                    this.poll(onChange, FAST_POLL_MS);
                 }));
+                native++;
             }
             catch (error) {
                 console.error('History native watcher unavailable; polling remains active.');
             }
         }
+        // The poll covers newly created roots and dead native watchers. With native
+        // watchers running it is only a safety net, so it need not stat every file often.
+        this.poll(onChange, native > 0 ? this.safetyPollMs : FAST_POLL_MS);
+    }
+    poll(onChange, everyMs) {
+        if (this.polling)
+            clearInterval(this.polling);
+        const known = this.known ?? new Map(enumerateSessionFiles().map(f => [f.filePath, `${f.mtime}:${f.size}`]));
+        this.known = known;
+        this.polling = setInterval(() => {
+            for (const f of enumerateSessionFiles()) {
+                const signature = `${f.mtime}:${f.size}`;
+                if (known.get(f.filePath) !== signature)
+                    onChange(f.filePath);
+                known.set(f.filePath, signature);
+            }
+        }, Math.max(this.debounceMs, everyMs));
+        this.polling.unref();
     }
     /**
      * Stop watching.
@@ -62,6 +77,7 @@ export class FileWatcher {
         if (this.polling)
             clearInterval(this.polling);
         this.polling = null;
+        this.known = null;
         for (const watcher of this.watchers)
             watcher.close();
         this.watchers = [];

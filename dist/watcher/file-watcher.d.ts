@@ -7,12 +7,15 @@ export declare class FileWatcher {
     private watchers;
     private debounceTimers;
     private debounceMs;
+    private safetyPollMs;
     private polling;
-    constructor(debounceMs?: 5000);
+    private known;
+    constructor(debounceMs?: 5000, safetyPollMs?: number);
     /**
      * Start watching the projects directory.
      */
     start(onChange: FileChangeCallback): void;
+    private poll;
     /**
      * Stop watching.
      */

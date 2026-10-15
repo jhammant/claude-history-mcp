@@ -2,19 +2,48 @@
  * Orchestrate indexing: parse sessions, chunk text, build BM25 + TF-IDF indexes.
  * Handles persistence via msgpack and incremental updates.
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
-import { dirname } from "path";
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync, } from "fs";
+import { basename, dirname } from "path";
 import { CONFIG } from "../config.js";
 import { enumerateSessionFiles, parseSessionFile, } from "../parsers/session-parser.js";
 import { tokenize } from "./tokenizer.js";
 import { BM25Index } from "./bm25.js";
 import { TFIDFIndex } from "./tfidf.js";
 import { DocumentStore, } from "./document-store.js";
+/**
+ * msgpack with 32-bit map headers. The default 16-bit headers can't hold a vocabulary
+ * past 65,535 terms: pack() threw, every save fell back to JSON, and load() kept
+ * reading the last msgpack that had fitted (27 sessions, months old), so each new
+ * server re-indexed months of history at start-up.
+ */
+async function packr() {
+    const { Packr } = await import("msgpackr");
+    return new Packr({ variableMapSize: true });
+}
+/** The module-level unpack reads both this format and files the old default pack() wrote. */
+async function unpackIndex(raw) {
+    const { unpack } = await import("msgpackr");
+    return unpack(raw);
+}
+function jsonIndexFile() {
+    return CONFIG.indexFile.replace(".msgpack", ".json");
+}
+/** Write via a temp file and rename, so a reader (or another server) never sees half an index. */
+function writeAtomically(path, data) {
+    const tmp = `${path}.${process.pid}.tmp`;
+    writeFileSync(tmp, data);
+    renameSync(tmp, path);
+}
 export class IndexManager {
     bm25;
     tfidf;
     documents;
     meta;
+    dirty = false;
+    /** True when the in-memory index has changes that are not on disk yet. */
+    get isDirty() {
+        return this.dirty;
+    }
     constructor() {
         this.bm25 = new BM25Index();
         this.tfidf = new TFIDFIndex();
@@ -46,6 +75,7 @@ export class IndexManager {
             sessionCount++;
         }
         this.meta.buildTime = Date.now() - startTime;
+        this.dirty = true;
         return {
             sessions: sessionCount,
             chunks: this.documents.getDocumentCount(),
@@ -76,7 +106,45 @@ export class IndexManager {
                 unchanged++;
             }
         }
+        if (added + updated > 0)
+            this.dirty = true;
         return { added, updated, unchanged };
+    }
+    /**
+     * Re-index one session file if it changed since it was last indexed. Returns the
+     * parsed session when it was re-indexed (so callers can reuse it), else null.
+     */
+    updateFile(filePath) {
+        let stat;
+        try {
+            stat = statSync(filePath);
+        }
+        catch {
+            return null;
+        }
+        if (!stat.isFile())
+            return null;
+        const lastMtime = this.meta.lastIndexed[filePath];
+        if (lastMtime !== undefined && stat.mtimeMs <= lastMtime)
+            return null;
+        const sessionId = basename(filePath, ".jsonl");
+        if (lastMtime !== undefined)
+            this.removeSession(sessionId);
+        return this.indexFile({
+            filePath,
+            projectDir: basename(dirname(filePath)),
+            sessionId,
+            mtime: stat.mtimeMs,
+            size: stat.size,
+        });
+    }
+    /** Drop the in-memory index (it can be several GB); load() brings it back. */
+    unload() {
+        this.bm25 = new BM25Index();
+        this.tfidf = new TFIDFIndex();
+        this.documents = new DocumentStore();
+        this.meta = { lastIndexed: {}, buildTime: 0, version: 1 };
+        this.dirty = false;
     }
     /**
      * Index a single session file.
@@ -84,7 +152,7 @@ export class IndexManager {
     indexFile(file) {
         const session = parseSessionFile(file.filePath, file.projectDir);
         if (!session)
-            return;
+            return null;
         const chunks = this.chunkSession(session);
         for (const chunk of chunks) {
             const tokens = tokenize(chunk.text, { includeBigrams: true });
@@ -100,6 +168,8 @@ export class IndexManager {
             this.tfidf.addDocument(docId, tokens);
         }
         this.meta.lastIndexed[file.filePath] = file.mtime;
+        this.dirty = true;
+        return session;
     }
     /**
      * Remove a session from all indexes.
@@ -107,7 +177,8 @@ export class IndexManager {
     removeSession(sessionId) {
         const docs = this.documents.getSessionDocuments(sessionId);
         for (const doc of docs) {
-            this.bm25.removeDocument(doc.id);
+            // Same tokenizer as indexFile, so these are exactly the terms the document was added under
+            this.bm25.removeDocument(doc.id, new Set(tokenize(doc.text, { includeBigrams: true })));
             this.tfidf.removeDocument(doc.id);
         }
         this.documents.removeSession(sessionId);
@@ -182,7 +253,7 @@ export class IndexManager {
         return chunks;
     }
     /**
-     * Save index to disk using msgpack.
+     * Save index to disk using msgpack (JSON if msgpack fails).
      */
     async save() {
         const dir = dirname(CONFIG.indexFile);
@@ -195,43 +266,34 @@ export class IndexManager {
             meta: this.meta,
         };
         try {
-            const { pack } = await import("msgpackr");
-            const packed = pack(data);
-            writeFileSync(CONFIG.indexFile, packed);
+            writeAtomically(CONFIG.indexFile, (await packr()).pack(data));
+            if (existsSync(jsonIndexFile()))
+                unlinkSync(jsonIndexFile());
         }
-        catch {
-            // Fallback to JSON if msgpack fails
-            writeFileSync(CONFIG.indexFile.replace(".msgpack", ".json"), JSON.stringify(data));
+        catch (error) {
+            console.error(`claude-history-mcp: msgpack save failed, writing JSON instead: ${error.message}`);
+            writeAtomically(jsonIndexFile(), JSON.stringify(data));
         }
+        this.dirty = false;
     }
     /**
-     * Load index from disk.
+     * Load index from disk: the newer of the msgpack and JSON files, so a stale file in
+     * one format never shadows a fresh one in the other.
      */
     async load() {
-        // Try msgpack first
-        if (existsSync(CONFIG.indexFile)) {
+        const candidates = [CONFIG.indexFile, jsonIndexFile()]
+            .filter((file) => existsSync(file))
+            .sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs);
+        for (const file of candidates) {
             try {
-                const { unpack } = await import("msgpackr");
-                const raw = readFileSync(CONFIG.indexFile);
-                const data = unpack(raw);
+                const data = (file.endsWith(".json")
+                    ? JSON.parse(readFileSync(file, "utf-8"))
+                    : await unpackIndex(readFileSync(file)));
                 this.restoreFromSerialized(data);
                 return true;
             }
             catch {
-                // Fall through to JSON
-            }
-        }
-        // Try JSON fallback
-        const jsonFile = CONFIG.indexFile.replace(".msgpack", ".json");
-        if (existsSync(jsonFile)) {
-            try {
-                const raw = readFileSync(jsonFile, "utf-8");
-                const data = JSON.parse(raw);
-                this.restoreFromSerialized(data);
-                return true;
-            }
-            catch {
-                return false;
+                // Try the other format
             }
         }
         return false;
@@ -241,6 +303,7 @@ export class IndexManager {
         this.tfidf = TFIDFIndex.deserialize(data.tfidf);
         this.documents = DocumentStore.deserialize(data.documents);
         this.meta = data.meta;
+        this.dirty = false;
     }
     /**
      * Get index statistics.

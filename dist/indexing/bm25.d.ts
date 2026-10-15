@@ -31,7 +31,7 @@ export declare class BM25Index {
     /**
      * Remove a document from the index.
      */
-    removeDocument(docId: number): void;
+    removeDocument(docId: number, terms?: Iterable<string>): void;
     /**
      * Search for documents matching query tokens.
      */

@@ -46,12 +46,12 @@ describe('Codex normalized feed', () => {
 
   it('reindexes fresh files after debounce rather than discarding their last update', async () => {
     const manager = new IndexManager();
-    const update = vi.spyOn(manager, 'incrementalUpdate');
+    const update = vi.spyOn(manager, 'updateFile');
     vi.spyOn(manager, 'save').mockResolvedValue(undefined);
     const knowledge = new KnowledgeStore();
     vi.spyOn(knowledge, 'save').mockImplementation(() => {});
     const indexer = new IncrementalIndexer(manager, knowledge);
-    await (indexer as unknown as {handleFileChange(path: string): Promise<void>}).handleFileChange(file);
+    (indexer as unknown as {handleFileChange(path: string): void}).handleFileChange(file);
     expect(update).toHaveBeenCalledOnce();
     expect(manager.getStats().sessions).toBe(1);
   });
@@ -68,7 +68,8 @@ describe('Codex normalized feed', () => {
   });
 
   it('watches the feed root and emits an absolute path', async () => {
-    const watcher = new FileWatcher(20);
+    // FSEvents can take seconds on a busy Mac; a short safety poll keeps this deterministic.
+    const watcher = new FileWatcher(20, 1000);
     try {
       const result = new Promise<string>((resolve, reject) => {
         const timeout = setTimeout(() => reject(new Error('watch timed out')), 7000);
