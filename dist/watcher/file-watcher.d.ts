@@ -4,14 +4,18 @@
  */
 export type FileChangeCallback = (filePath: string) => void;
 export declare class FileWatcher {
-    private watcher;
+    private watchers;
     private debounceTimers;
     private debounceMs;
-    constructor(debounceMs?: 5000);
+    private safetyPollMs;
+    private polling;
+    private known;
+    constructor(debounceMs?: 5000, safetyPollMs?: number);
     /**
      * Start watching the projects directory.
      */
     start(onChange: FileChangeCallback): void;
+    private poll;
     /**
      * Stop watching.
      */

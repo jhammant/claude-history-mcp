@@ -12,6 +12,11 @@ import { handleFindSolutions } from "./tools/find-solutions.js";
 import { handleGetSessionSummary } from "./tools/get-session-summary.js";
 import { handleGetProjectContext } from "./tools/get-project-context.js";
 import { handleFindPatterns } from "./tools/find-patterns.js";
+import { IncrementalIndexer } from "./watcher/incremental-indexer.js";
+import { KnowledgeStore } from "./knowledge/knowledge-store.js";
+
+const IDLE_UNLOAD_MS = 30 * 60_000;
+const IDLE_CHECK_MS = 5 * 60_000;
 
 export function createServer(): {
   server: McpServer;
@@ -28,20 +33,43 @@ export function createServer(): {
 
   const indexManager = new IndexManager();
   const searchEngine = new SearchEngine(indexManager);
+  const knowledgeStore = new KnowledgeStore();
+  knowledgeStore.load();
+  const indexer = new IncrementalIndexer(indexManager, knowledgeStore);
+  server.server.onclose = () => indexer.stop();
   let initialized = false;
+  let lastUsed = Date.now();
 
   async function ensureIndex(): Promise<void> {
+    lastUsed = Date.now();
     if (initialized) return;
 
     const loaded = await indexManager.load();
     if (loaded) {
-      indexManager.incrementalUpdate().catch(() => {});
+      // incrementalUpdate has no internal awaits — its synchronous CPU work
+      // would block the event loop and stall the response over stdio.
+      // Defer with setImmediate so the current tool response can be sent first.
+      setImmediate(() => {
+        indexManager.incrementalUpdate()
+          .then(() => indexer.scheduleSave())
+          .catch(() => {});
+      });
     } else {
       await indexManager.buildFullIndex();
       await indexManager.save().catch(() => {});
     }
     initialized = true;
+    indexer.start();
   }
+
+  // Every session runs its own server, and a loaded index takes GBs: let it go when
+  // the session stops asking. The next tool call loads it again (a few seconds).
+  setInterval(() => {
+    if (!initialized || Date.now() - lastUsed < IDLE_UNLOAD_MS) return;
+    indexer.stop();
+    indexManager.unload();
+    initialized = false;
+  }, IDLE_CHECK_MS).unref();
 
   // Register tools
   server.tool(

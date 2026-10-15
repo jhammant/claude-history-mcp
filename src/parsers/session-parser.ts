@@ -161,11 +161,9 @@ export interface SessionFileInfo {
  * Enumerate all session JSONL files across all projects.
  */
 export function enumerateSessionFiles(): SessionFileInfo[] {
-  const projectsDir = CONFIG.projectsDir;
-  if (!existsSync(projectsDir)) return [];
-
   const results: SessionFileInfo[] = [];
-
+  for (const projectsDir of CONFIG.projectRoots) {
+  if (!existsSync(projectsDir)) continue;
   for (const projectDir of readdirSync(projectsDir)) {
     const projectPath = join(projectsDir, projectDir);
     let stat;
@@ -197,5 +195,6 @@ export function enumerateSessionFiles(): SessionFileInfo[] {
     }
   }
 
+  }
   return results;
 }

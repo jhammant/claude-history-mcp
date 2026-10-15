@@ -68,4 +68,20 @@ describe("BM25Index", () => {
     expect(results[0].docId).toBe(0);
     expect(restored.getDocumentCount()).toBe(2);
   });
+
+  it("removes a document by its terms exactly as a full scan does", () => {
+    const build = () => {
+      const i = new BM25Index();
+      i.addDocument(0, ["docker", "network", "error"]);
+      i.addDocument(1, ["docker", "react", "react"]);
+      i.addDocument(2, ["network", "only"]);
+      return i;
+    };
+    const scanned = build();
+    scanned.removeDocument(1);
+    const targeted = build();
+    targeted.removeDocument(1, new Set(["docker", "react"]));
+    expect(targeted.serialize()).toEqual(scanned.serialize());
+    expect(targeted.search(["react"])).toEqual([]);
+  });
 });
