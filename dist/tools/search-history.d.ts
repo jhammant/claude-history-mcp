@@ -1,34 +1,13 @@
-import type { SearchEngine } from "../search/search-engine.js";
-export declare const searchHistoryTool: {
-    name: string;
-    description: string;
-    inputSchema: {
-        type: "object";
-        properties: {
-            query: {
-                type: string;
-                description: string;
-            };
-            project: {
-                type: string;
-                description: string;
-            };
-            limit: {
-                type: string;
-                description: string;
-            };
-            include_context: {
-                type: string;
-                description: string;
-            };
-        };
-        required: string[];
-    };
-};
-export declare function handleSearchHistory(engine: SearchEngine, args: {
+import type { SearchEngine, SortOrder } from "../search/search-engine.js";
+export interface SearchHistoryArgs {
     query: string;
     project?: string;
     limit?: number;
     include_context?: boolean;
+    sort?: SortOrder;
+}
+export declare function handleSearchHistory(engine: SearchEngine, args: SearchHistoryArgs, context?: {
+    currentProject?: string;
+    freshness?: string;
 }): string;
 //# sourceMappingURL=search-history.d.ts.map

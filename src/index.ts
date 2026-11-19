@@ -1,23 +1,39 @@
 #!/usr/bin/env node
 
 /**
- * Claude History MCP Server — entry point.
- * Communicates over stdio transport.
+ * Claude History MCP — one entry point.
+ *
+ *   node dist/index.js                  run the MCP server over stdio
+ *   node dist/index.js <command> ...    sweep | rebuild | status | import-legacy | search | help
  */
 
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { createServer } from "./server.js";
+import { COMMANDS } from "./cli/command-names.js";
 
-async function main(): Promise<void> {
+async function startServer(): Promise<void> {
+  const { StdioServerTransport } = await import("@modelcontextprotocol/sdk/server/stdio.js");
+  const { createServer } = await import("./server.js");
   const { server } = createServer();
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  // The SDK's stdio transport never notices stdin closing, so the server and its file
-  // watchers would outlive their client. Close it here: onclose saves the index, then
-  // nothing is left running and the process exits.
+  // The SDK's stdio transport never notices stdin closing; close it so the process exits.
   process.stdin.on("end", () => {
     transport.close().catch(() => {});
   });
+}
+
+async function main(): Promise<void> {
+  const command = process.argv[2];
+  if (command && (COMMANDS as readonly string[]).includes(command)) {
+    const { runCommand } = await import("./cli/commands.js");
+    process.exitCode = await runCommand(command, process.argv.slice(3));
+    return;
+  }
+  if (command) {
+    console.error(`Unknown command "${command}". Commands: ${COMMANDS.join(", ")}. With no command, runs the MCP server.`);
+    process.exitCode = 2;
+    return;
+  }
+  await startServer();
 }
 
 main().catch((error) => {

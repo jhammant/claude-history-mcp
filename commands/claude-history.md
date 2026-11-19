@@ -24,6 +24,9 @@ Parse the user's arguments and use the appropriate MCP tool from `claude-history
 5. **If `--projects` flag**: Use `list_projects` tool
 6. **Otherwise**: Use `search_history` tool with the full text as the query
 
+To see what actually happened around a hit, call `read_session` with the hit's session id
+and message number (`around`).
+
 ## Presentation
 
 Present results clearly:

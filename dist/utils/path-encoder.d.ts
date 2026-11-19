@@ -10,8 +10,4 @@ export declare function decodeProjectPath(encoded: string): string;
  *       -Users-jon-dev-ESTAR-Zolo -> ESTAR-Zolo
  */
 export declare function extractProjectName(encodedOrPath: string): string;
-/**
- * Find which encoded project directory matches a given working directory.
- */
-export declare function matchProjectDir(cwd: string, projectDirs: string[]): string | null;
 //# sourceMappingURL=path-encoder.d.ts.map

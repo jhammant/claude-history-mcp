@@ -1,21 +1,5 @@
-export declare const getSessionSummaryTool: {
-    name: string;
-    description: string;
-    inputSchema: {
-        type: "object";
-        properties: {
-            session_id: {
-                type: string;
-                description: string;
-            };
-            project: {
-                type: string;
-                description: string;
-            };
-        };
-    };
-};
-export declare function handleGetSessionSummary(args: {
+import type { DB } from "../db/database.js";
+export declare function handleGetSessionSummary(db: DB, args: {
     session_id?: string;
     project?: string;
 }): string;

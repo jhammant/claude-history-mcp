@@ -33,7 +33,30 @@ describe("extractContent", () => {
         input: { command: "docker build -t myapp ." },
       },
     ]);
-    expect(result.toolInputSnippets).toContain("docker build -t myapp .");
+    expect(result.toolInputSnippets).toContain("Bash: docker build -t myapp .");
+  });
+
+  it("should keep tool results given as a string", () => {
+    const result = extractContent([{ type: "tool_result", content: "ECONNREFUSED 127.0.0.1:5432" }]);
+    expect(result.toolResults.map((r) => r.text)).toEqual(["ECONNREFUSED 127.0.0.1:5432"]);
+    expect(result.text).toBe("");
+  });
+
+  it("should keep tool results given as a block array", () => {
+    const result = extractContent([
+      { type: "tool_result", content: [{ type: "text", text: "first part" }, { type: "image" }, { type: "text", text: "second part" }] },
+    ]);
+    expect(result.toolResults.map((r) => r.text)).toEqual(["first part\n[image]\nsecond part"]);
+  });
+
+  it("should cap a tool result at about 2,000 characters", () => {
+    const result = extractContent([{ type: "tool_result", content: "word ".repeat(2000) }]);
+    expect(result.toolResults[0].text.length).toBeLessThanOrEqual(2000);
+  });
+
+  it("should replace binary-looking output", () => {
+    const result = extractContent([{ type: "tool_result", content: "\u0000\u0001\u0002\u0003".repeat(50) }]);
+    expect(result.toolResults.map((r) => r.text)).toEqual(["[binary output]"]);
   });
 
   it("should detect code blocks", () => {
@@ -56,13 +79,9 @@ describe("extractContent", () => {
     expect(result.text).not.toContain("internal reasoning");
   });
 
-  it("should strip markdown formatting", () => {
-    const result = extractContent("**bold** and *italic* and [link](url)");
-    expect(result.text).toContain("bold");
-    expect(result.text).toContain("italic");
-    expect(result.text).toContain("link");
-    expect(result.text).not.toContain("**");
-    expect(result.text).not.toContain("(url)");
+  it("should keep markdown and line breaks for reading back", () => {
+    const result = extractContent("**bold** line\n\n\n\nnext `code`");
+    expect(result.text).toBe("**bold** line\n\nnext `code`");
   });
 });
 

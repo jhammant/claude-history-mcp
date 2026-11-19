@@ -1,47 +1,43 @@
-import {
-  parseHistoryFile,
-  groupByProject,
-  groupBySession,
-} from "../parsers/history-parser.js";
-import { extractProjectName } from "../utils/path-encoder.js";
+import type { DB } from "../db/database.js";
+import { inList, matchProjects } from "./project-match.js";
 
-export const findPatternsTool = {
-  name: "find_patterns",
-  description:
-    "Discover recurring patterns in conversation history: common topics, frequent workflows, repeated issues.",
-  inputSchema: {
-    type: "object" as const,
-    properties: {
-      project: {
-        type: "string",
-        description: "Limit to a specific project",
-      },
-      type: {
-        type: "string",
-        enum: ["topics", "workflows", "issues", "all"],
-        description:
-          "Type of patterns to find (default: all)",
-      },
-    },
-  },
-};
+interface PromptEntry {
+  display: string;
+  timestamp: number;
+  project: string;
+  sessionId: string;
+}
 
-export function handleFindPatterns(args: {
+/** The newest user prompts (top-level sessions only), optionally for some projects. */
+function loadPrompts(db: DB, projects: string[] | null): PromptEntry[] {
+  const list = projects ? inList(projects) : null;
+  return db
+    .prepare(
+      `SELECT t.prose AS display, coalesce(m.ts, 0) AS timestamp, s.project, s.id AS sessionId
+       FROM messages m JOIN sessions s ON s.sid = m.session_sid JOIN message_text t ON t.id = m.id
+       WHERE m.role = 'user' AND s.is_subagent = 0 ${list ? `AND s.project IN (${list.sql})` : ""}
+       ORDER BY m.ts DESC LIMIT 20000`
+    )
+    .all(...(list?.params ?? [])) as PromptEntry[];
+}
+
+function groupBySession(entries: PromptEntry[]): Map<string, PromptEntry[]> {
+  const groups = new Map<string, PromptEntry[]>();
+  for (const entry of entries) {
+    const group = groups.get(entry.sessionId);
+    if (group) group.push(entry);
+    else groups.set(entry.sessionId, [entry]);
+  }
+  return groups;
+}
+
+export function handleFindPatterns(db: DB, args: {
   project?: string;
   type?: string;
 }): string {
-  const entries = parseHistoryFile();
   const patternType = args.type || "all";
-
-  let filtered = entries;
-  if (args.project) {
-    const query = args.project.toLowerCase();
-    filtered = entries.filter(
-      (e) =>
-        e.project.toLowerCase().includes(query) ||
-        extractProjectName(e.project).toLowerCase().includes(query)
-    );
-  }
+  const projects = args.project ? matchProjects(db, args.project) : null;
+  const filtered = projects && projects.length === 0 ? [] : loadPrompts(db, projects);
 
   if (filtered.length === 0) {
     return args.project
@@ -114,9 +110,7 @@ function findTopicPatterns(
     .map(([word, count]) => `"${word}" — mentioned in ${count} messages`);
 }
 
-function findActivityPatterns(
-  entries: Array<{ timestamp: number; project: string; sessionId: string }>
-): string[] {
+function findActivityPatterns(entries: PromptEntry[]): string[] {
   const patterns: string[] = [];
 
   // Sessions per day of week
@@ -143,7 +137,7 @@ function findActivityPatterns(
   );
 
   // Average session length
-  const bySession = groupBySession(entries as Array<{ display: string; timestamp: number; project: string; sessionId: string }>);
+  const bySession = groupBySession(entries);
   const sessionLengths: number[] = [];
   for (const [_, sessionEntries] of bySession) {
     sessionLengths.push(sessionEntries.length);

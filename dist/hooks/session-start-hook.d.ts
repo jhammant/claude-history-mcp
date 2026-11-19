@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 /**
- * Session-start hook: auto-inject project context on new Claude Code session.
+ * Session-start hook: auto-inject project context in Claude Code and Codex.
  *
- * Reads pre-computed summaries and knowledge directly from ~/.claude-history-mcp/
- * and outputs brief context to stdout. Target: <200ms.
+ * Reads the latest session summaries and extracted knowledge for the current project
+ * from the history database (indexed queries, read-only) and prints one hook JSON
+ * object to stdout. Prints nothing when there is no context, and exits silently when
+ * the database is missing, locked or unreadable. Target: well under 200 ms.
  *
- * Register in ~/.claude/settings.json as a SessionStart hook.
+ * Register as a SessionStart command hook in Claude Code or Codex.
  */
 export {};
 //# sourceMappingURL=session-start-hook.d.ts.map

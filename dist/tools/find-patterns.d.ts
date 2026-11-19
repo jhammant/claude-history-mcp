@@ -1,22 +1,5 @@
-export declare const findPatternsTool: {
-    name: string;
-    description: string;
-    inputSchema: {
-        type: "object";
-        properties: {
-            project: {
-                type: string;
-                description: string;
-            };
-            type: {
-                type: string;
-                enum: string[];
-                description: string;
-            };
-        };
-    };
-};
-export declare function handleFindPatterns(args: {
+import type { DB } from "../db/database.js";
+export declare function handleFindPatterns(db: DB, args: {
     project?: string;
     type?: string;
 }): string;

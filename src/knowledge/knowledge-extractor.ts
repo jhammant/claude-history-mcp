@@ -4,7 +4,7 @@
  */
 
 import { randomUUID } from "crypto";
-import type { ParsedSession } from "../parsers/session-parser.js";
+import type { ParsedSession } from "./parsed-session.js";
 import type { KnowledgeEntry } from "./knowledge-store.js";
 
 const DECISION_PATTERNS = [

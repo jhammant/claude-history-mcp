@@ -1,24 +1,10 @@
+import type { DB } from "../db/database.js";
 import type { SearchEngine } from "../search/search-engine.js";
-export declare const findSolutionsTool: {
-    name: string;
-    description: string;
-    inputSchema: {
-        type: "object";
-        properties: {
-            error_or_problem: {
-                type: string;
-                description: string;
-            };
-            technology: {
-                type: string;
-                description: string;
-            };
-        };
-        required: string[];
-    };
-};
-export declare function handleFindSolutions(engine: SearchEngine, args: {
+export declare function handleFindSolutions(db: DB, engine: SearchEngine, args: {
     error_or_problem: string;
     technology?: string;
+}, context?: {
+    currentProject?: string;
+    freshness?: string;
 }): string;
 //# sourceMappingURL=find-solutions.d.ts.map

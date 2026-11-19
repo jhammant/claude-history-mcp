@@ -1,118 +1,90 @@
-import { parseHistoryFile, groupBySession, getProjectInfos } from "../parsers/history-parser.js";
-import { extractProjectName } from "../utils/path-encoder.js";
-import type { SearchEngine } from "../search/search-engine.js";
+import type { DB } from "../db/database.js";
+import { projectKnowledge } from "../knowledge/knowledge-store.js";
+import { formatDateTime, projectName } from "../search/format.js";
+import { encodeProjectPath } from "../utils/path-encoder.js";
+import { inList, matchProjects } from "./project-match.js";
 
-export const getProjectContextTool = {
-  name: "get_project_context",
-  description:
-    "Get comprehensive context for a project: recent sessions, key topics, common tools, and patterns. Useful for session-start context injection.",
-  inputSchema: {
-    type: "object" as const,
-    properties: {
-      project: {
-        type: "string",
-        description:
-          "Project name or path. Defaults to current working directory.",
-      },
-      depth: {
-        type: "string",
-        enum: ["brief", "normal", "detailed"],
-        description:
-          "Detail level: brief (last session only), normal (last 3), detailed (last 5 + patterns). Default: normal.",
-      },
-    },
-  },
-};
+interface SessionRow {
+  id: string;
+  project: string;
+  cwd: string | null;
+  title: string | null;
+  first_prompt: string | null;
+  end_time: number | null;
+  message_count: number;
+}
 
-export function handleGetProjectContext(
-  engine: SearchEngine,
-  args: { project?: string; depth?: string }
-): string {
-  const project = args.project || "";
-  const depth = args.depth || "normal";
+function daysAgo(ms: number | null): string {
+  if (!ms) return "unknown";
+  const days = Math.floor((Date.now() - ms) / 86_400_000);
+  return days <= 0 ? "today" : days === 1 ? "yesterday" : `${days} days ago`;
+}
 
-  if (!project) {
-    return "Please provide a project name or path.";
-  }
+export function handleGetProjectContext(db: DB, args: { project?: string; depth?: string }, cwd = process.cwd()): string {
+  const query = args.project?.trim() || cwd;
+  const depth = args.depth ?? "normal";
+  const projects = args.project?.trim() ? matchProjects(db, query) : matchProjects(db, encodeProjectPath(cwd));
+  if (projects.length === 0) return `No history found for project "${query}".`;
 
-  const entries = parseHistoryFile();
-  const query = project.toLowerCase();
-
-  const matching = entries.filter(
-    (e) =>
-      e.project.toLowerCase().includes(query) ||
-      extractProjectName(e.project).toLowerCase().includes(query)
-  );
-
-  if (matching.length === 0) {
-    return `No history found for project "${project}".`;
-  }
-
-  const projectName = extractProjectName(matching[0].project);
-  const bySession = groupBySession(matching);
-
-  // Sort sessions by most recent activity
-  const sessionList = [...bySession.entries()]
-    .map(([sessionId, entries]) => ({
-      sessionId,
-      entries,
-      lastActivity: Math.max(...entries.map((e) => e.timestamp)),
-      firstActivity: Math.min(...entries.map((e) => e.timestamp)),
-    }))
-    .sort((a, b) => b.lastActivity - a.lastActivity);
-
+  const list = inList(projects);
+  const totals = db
+    .prepare(
+      `SELECT count(*) AS sessions, sum(message_count) AS messages, max(cwd) AS cwd
+       FROM sessions WHERE project IN (${list.sql}) AND is_subagent = 0`
+    )
+    .get(...list.params) as { sessions: number; messages: number | null; cwd: string | null };
   const sessionCount = depth === "brief" ? 1 : depth === "detailed" ? 5 : 3;
+  const recent = db
+    .prepare(
+      `SELECT id, project, cwd, title, first_prompt, end_time, message_count FROM sessions
+       WHERE project IN (${list.sql}) AND is_subagent = 0 ORDER BY end_time DESC LIMIT ?`
+    )
+    .all(...list.params, sessionCount) as SessionRow[];
 
-  const lines: string[] = [
-    `## Project Context: ${projectName}`,
+  const lines = [
+    `## Project Context: ${projectName(projects[0], totals.cwd)}`,
     "",
-    `**Total sessions**: ${sessionList.length}`,
-    `**Total messages**: ${matching.length}`,
-    "",
-    `### Recent Sessions`,
+    `**Total sessions**: ${totals.sessions}`,
+    `**Total messages**: ${totals.messages ?? 0}`,
   ];
-
-  for (const session of sessionList.slice(0, sessionCount)) {
-    const date = new Date(session.lastActivity).toLocaleDateString();
-    const daysAgo = Math.floor(
-      (Date.now() - session.lastActivity) / 86400000
-    );
-    const daysStr =
-      daysAgo === 0
-        ? "today"
-        : daysAgo === 1
-          ? "yesterday"
-          : `${daysAgo} days ago`;
-
-    // First user message as topic
-    const firstMsg = session.entries[0]?.display || "Unknown topic";
-    const topic =
-      firstMsg.length > 120 ? firstMsg.slice(0, 120) + "..." : firstMsg;
-
-    lines.push(`- **${date}** (${daysStr}): ${topic}`);
-    lines.push(`  Session: ${session.sessionId} — ${session.entries.length} messages`);
+  if (projects.length > 1) lines.push(`**Matched projects**: ${projects.length} (${projects.slice(0, 5).join(", ")}${projects.length > 5 ? ", …" : ""})`);
+  lines.push("", "### Recent Sessions");
+  for (const s of recent) {
+    const topic = (s.title || s.first_prompt || "Unknown topic").replace(/\s+/g, " ");
+    lines.push(`- **${formatDateTime(s.end_time).slice(0, 10)}** (${daysAgo(s.end_time)}): ${topic.length > 120 ? topic.slice(0, 120) + "..." : topic}`);
+    lines.push(`  Session: ${s.id} — ${s.message_count} messages`);
   }
 
-  // If detailed, also search for patterns
-  if (depth === "detailed") {
-    lines.push("");
-    lines.push("### Common Topics");
+  const perType = depth === "detailed" ? 5 : depth === "brief" ? 1 : 2;
+  const knowledge = projects.slice(0, 5).flatMap((p) => [
+    ...projectKnowledge(db, p, "decision", perType),
+    ...projectKnowledge(db, p, "solution", perType),
+    ...projectKnowledge(db, p, "error_fix", perType),
+  ]);
+  if (knowledge.length) {
+    lines.push("", "### Decisions and Fixes");
+    const label = { decision: "Decision", solution: "Solution", error_fix: "Error fix", pattern: "Pattern" } as const;
+    for (const k of knowledge.sort((a, b) => b.timestamp - a.timestamp).slice(0, perType * 3)) {
+      lines.push(`- ${label[k.type]}: ${k.summary}`);
+    }
+  }
 
-    // Simple frequency analysis of user messages
-    const allDisplays = matching.map((e) => e.display.toLowerCase());
+  if (depth === "detailed") {
+    const prompts = db
+      .prepare(
+        `SELECT t.prose FROM messages m JOIN sessions s ON s.sid = m.session_sid JOIN message_text t ON t.id = m.id
+         WHERE s.project IN (${list.sql}) AND s.is_subagent = 0 AND m.role = 'user'
+         ORDER BY m.ts DESC LIMIT 5000`
+      )
+      .all(...list.params) as Array<{ prose: string }>;
     const wordFreq = new Map<string, number>();
-    for (const display of allDisplays) {
-      const words = display.split(/\s+/).filter((w) => w.length > 4);
-      for (const word of words) {
-        wordFreq.set(word, (wordFreq.get(word) || 0) + 1);
+    for (const { prose } of prompts) {
+      for (const word of prose.toLowerCase().split(/\s+/)) {
+        if (word.length > 4) wordFreq.set(word, (wordFreq.get(word) ?? 0) + 1);
       }
     }
-
-    const topWords = [...wordFreq.entries()]
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 10);
-
-    for (const [word, count] of topWords) {
+    lines.push("", "### Common Topics");
+    for (const [word, count] of [...wordFreq.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10)) {
       lines.push(`- "${word}" (${count} mentions)`);
     }
   }
