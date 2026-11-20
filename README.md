@@ -15,7 +15,7 @@ ClaudeHistory fixes this by indexing your existing conversation transcripts and 
 1. Install version 2 from GitHub (Node 22 or newer):
 
 ```bash
-npm install -g github:jhammant/claude-history-mcp
+npm install -g https://github.com/jhammant/claude-history-mcp/archive/refs/heads/main.tar.gz
 ```
 
 2. Add the server to `~/.claude/settings.json`:
