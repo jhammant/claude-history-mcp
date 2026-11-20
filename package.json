@@ -1,6 +1,6 @@
 {
   "name": "claude-history-mcp",
-  "version": "0.3.0",
+  "version": "2.0.0",
   "description": "MCP server for searching Claude Code and Codex conversation history (SQLite FTS5), with cloud sync and federated learning",
   "type": "module",
   "main": "dist/index.js",

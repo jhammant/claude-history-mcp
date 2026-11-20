@@ -12,26 +12,31 @@ ClaudeHistory fixes this by indexing your existing conversation transcripts and 
 
 ## Install
 
-1. Add the server to `~/.claude/settings.json`:
+1. Install version 2 from GitHub (Node 22 or newer):
+
+```bash
+npm install -g github:jhammant/claude-history-mcp
+```
+
+2. Add the server to `~/.claude/settings.json`:
 
 ```json
 {
   "mcpServers": {
     "history": {
-      "command": "npx",
-      "args": ["-y", "claude-history-mcp"]
+      "command": "claude-history-mcp"
     }
   }
 }
 ```
 
-2. Build the history database once (a few minutes for a large history):
+3. Build the history database once (a few minutes for a large history):
 
 ```bash
-npx claude-history-mcp sweep
+claude-history-mcp sweep
 ```
 
-3. Schedule the same command to run every night (cron, launchd or any scheduler), so the
+4. Schedule the same command to run every night (cron, launchd or any scheduler), so the
    database keeps up with new sessions. Restart Claude Code. Done.
 
 Until the database exists, every tool answers with the command to run instead of building
@@ -98,7 +103,7 @@ node dist/index.js sweep [--json]        # index what changed, refresh summaries
 node dist/index.js status [--json]       # size, sessions, messages, oldest/newest, files behind, last sweep
 node dist/index.js search "<query>" [--limit N] [--project P] [--context] [--sort recent] [--timing] [--no-topup]
 node dist/index.js rebuild [--json]      # build a fresh database beside the old one and swap it in
-node dist/index.js import-legacy         # one-time import from the pre-0.3 index (see below)
+node dist/index.js import-legacy         # one-time import from the version 1 index (see below)
 npm run build-index                      # same as sweep, from the TypeScript sources
 ```
 
@@ -111,9 +116,9 @@ messages are new since the last compaction: keeping each table in one place roug
 the time of a search on a cold disk cache. `rebuild` keeps every session whose transcript no longer exists, and swaps the
 new database in with SQLite's online backup, so open servers simply see the new data.
 
-### Upgrading from 0.2 (index.msgpack)
+### Upgrading from version 1 (index.msgpack)
 
-Versions before 0.3 kept an in-memory index in `~/.claude-history-mcp/index.msgpack`, which
+Version 1 (0.x) kept an in-memory index in `~/.claude-history-mcp/index.msgpack`, which
 may be the only copy of sessions whose transcripts Claude Code has since deleted. Import
 it once, after the first sweep and not alongside another heavy job:
 
@@ -243,7 +248,7 @@ Two runtime dependencies besides the MCP SDK: `better-sqlite3` (pinned) and `zod
 
 - **MCP Client (this repo):** MIT license — use it however you want
 - **Cloud Server:** [github.com/jhammant/claude-history-cloud](https://github.com/jhammant/claude-history-cloud) (AGPL)
-- **npm:** `npm i claude-history-mcp`
+- **npm:** `claude-history-mcp` (still version 1; install version 2 from GitHub as above)
 
 ## License
 
