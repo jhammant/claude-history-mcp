@@ -1,84 +1,80 @@
 /**
- * Persist and query extracted knowledge entries.
+ * Extracted knowledge (decisions, solutions, error fixes) in the database.
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
-import { dirname } from "path";
-import { CONFIG } from "../config.js";
-export class KnowledgeStore {
-    entries = [];
-    addEntry(entry) {
-        // Deduplicate by summary similarity
-        const existing = this.entries.find((e) => e.project === entry.project &&
-            e.type === entry.type &&
-            e.summary === entry.summary);
-        if (existing)
-            return;
-        this.entries.push(entry);
+function parseList(json) {
+    try {
+        const value = JSON.parse(json);
+        return Array.isArray(value) ? value.filter((v) => typeof v === "string") : [];
     }
-    /**
-     * Find entries matching a query.
-     */
-    search(query, project) {
-        const queryLower = query.toLowerCase();
-        const queryWords = queryLower.split(/\s+/);
-        return this.entries
-            .filter((e) => {
-            if (project && !e.project.toLowerCase().includes(project.toLowerCase()))
-                return false;
-            const text = `${e.summary} ${e.details} ${e.tags.join(" ")}`.toLowerCase();
-            return queryWords.some((w) => text.includes(w));
-        })
-            .sort((a, b) => b.timestamp - a.timestamp);
+    catch {
+        return [];
     }
-    /**
-     * Get entries for a project.
-     */
-    getProjectEntries(project) {
-        const query = project.toLowerCase();
-        return this.entries
-            .filter((e) => e.project.toLowerCase().includes(query))
-            .sort((a, b) => b.timestamp - a.timestamp);
+}
+function toEntry(row) {
+    return {
+        id: String(row.id),
+        type: row.type,
+        project: row.project,
+        sessionId: row.session_id,
+        timestamp: row.ts,
+        summary: row.summary,
+        details: row.details,
+        tags: parseList(row.tags),
+        relatedFiles: parseList(row.related_files),
+    };
+}
+/**
+ * Insert entries, skipping any whose (project, type, summary) is already known —
+ * the same de-duplication the JSON store did.
+ */
+export function insertKnowledge(db, entries) {
+    const insert = db.prepare(`INSERT OR IGNORE INTO knowledge(type, project, session_id, ts, summary, details, tags, related_files)
+     VALUES (@type, @project, @sessionId, @timestamp, @summary, @details, @tags, @relatedFiles)`);
+    let inserted = 0;
+    for (const e of entries) {
+        if (!e || typeof e.summary !== "string" || !e.summary || typeof e.type !== "string")
+            continue;
+        inserted += insert.run({
+            type: e.type,
+            project: e.project ?? "",
+            sessionId: e.sessionId ?? "",
+            timestamp: Number(e.timestamp) || 0,
+            summary: e.summary,
+            details: e.details ?? "",
+            tags: JSON.stringify(e.tags ?? []),
+            relatedFiles: JSON.stringify(e.relatedFiles ?? []),
+        }).changes;
     }
-    /**
-     * Get entries by type.
-     */
-    getByType(type, project) {
-        return this.entries
-            .filter((e) => {
-            if (e.type !== type)
-                return false;
-            if (project && !e.project.toLowerCase().includes(project.toLowerCase()))
-                return false;
-            return true;
-        })
-            .sort((a, b) => b.timestamp - a.timestamp);
+    return inserted;
+}
+/** Replace what was extracted from one session (it is re-extracted as the session grows). */
+export function replaceSessionKnowledge(db, sessionId, entries) {
+    db.prepare("DELETE FROM knowledge WHERE session_id = ?").run(sessionId);
+    insertKnowledge(db, entries);
+}
+/** Entries for a project (exact encoded dir, or a dir beneath it), newest first. */
+export function projectKnowledge(db, project, type, limit) {
+    const rows = db
+        .prepare(`SELECT * FROM knowledge WHERE project >= ? AND project < ? AND type = ?
+       ORDER BY ts DESC LIMIT ?`)
+        .all(project, project + "￿", type, limit);
+    return rows.map(toEntry);
+}
+/** Entries whose summary mentions any of the words, newest first. */
+export function searchKnowledge(db, words, limit, types) {
+    const usable = words.filter((w) => w.length >= 3).slice(0, 8);
+    if (usable.length === 0)
+        return [];
+    const clauses = usable.map(() => "summary LIKE ? ESCAPE '\\'");
+    const params = usable.map((w) => `%${w.replace(/[\\%_]/g, (c) => "\\" + c)}%`);
+    let typeClause = "";
+    if (types?.length) {
+        typeClause = ` AND type IN (${types.map(() => "?").join(", ")})`;
+        params.push(...types);
     }
-    /**
-     * Save to disk.
-     */
-    save() {
-        const dir = dirname(CONFIG.knowledgeFile);
-        if (!existsSync(dir))
-            mkdirSync(dir, { recursive: true });
-        writeFileSync(CONFIG.knowledgeFile, JSON.stringify(this.entries, null, 2));
-    }
-    /**
-     * Load from disk.
-     */
-    load() {
-        if (!existsSync(CONFIG.knowledgeFile))
-            return false;
-        try {
-            const raw = readFileSync(CONFIG.knowledgeFile, "utf-8");
-            this.entries = JSON.parse(raw);
-            return true;
-        }
-        catch {
-            return false;
-        }
-    }
-    getEntryCount() {
-        return this.entries.length;
-    }
+    const rows = db
+        .prepare(`SELECT * FROM knowledge WHERE (${clauses.join(" OR ")})${typeClause} ORDER BY ts DESC LIMIT ?`)
+        .all(...params, limit);
+    return rows.map(toEntry);
 }
 //# sourceMappingURL=knowledge-store.js.map

@@ -2,9 +2,7 @@
  * Heuristic session summarizer — no LLM needed.
  * Generates structured summaries from parsed session data.
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
-import { join } from "path";
-import { CONFIG } from "../config.js";
+import { isLocalCommandEcho } from "../parsers/content-extractor.js";
 import { extractProjectName } from "../utils/path-encoder.js";
 /**
  * Generate a heuristic summary for a session.
@@ -18,13 +16,10 @@ export function summarizeSession(session) {
             .filter((s) => s.startsWith("/") || s.includes("."))),
     ];
     const hasCode = session.messages.some((m) => m.hasCode);
-    const topic = userMessages.length > 0
-        ? userMessages[0].text.slice(0, 150)
-        : "Unknown";
+    const asked = userMessages.filter((m) => !isLocalCommandEcho(m.text));
+    const topic = (asked[0] ?? userMessages[0])?.text.slice(0, 150) ?? "Unknown";
     const keyTopics = extractKeyTopics(userMessages.map((m) => m.text).join(" "));
-    const lastUserMsg = userMessages.length > 0
-        ? userMessages[userMessages.length - 1].text.slice(0, 150)
-        : "";
+    const lastUserMsg = (asked[asked.length - 1] ?? userMessages[userMessages.length - 1])?.text.slice(0, 150) ?? "";
     return {
         sessionId: session.sessionId,
         project: session.project,
@@ -42,29 +37,10 @@ export function summarizeSession(session) {
         lastUserMessage: lastUserMsg,
     };
 }
-/**
- * Cache a session summary to disk.
- */
-export function cacheSummary(summary) {
-    const dir = CONFIG.summariesDir;
-    if (!existsSync(dir))
-        mkdirSync(dir, { recursive: true });
-    const filePath = join(dir, `${summary.sessionId}.json`);
-    writeFileSync(filePath, JSON.stringify(summary, null, 2));
-}
-/**
- * Load a cached summary.
- */
-export function loadCachedSummary(sessionId) {
-    const filePath = join(CONFIG.summariesDir, `${sessionId}.json`);
-    if (!existsSync(filePath))
-        return null;
-    try {
-        return JSON.parse(readFileSync(filePath, "utf-8"));
-    }
-    catch {
-        return null;
-    }
+/** Store (or replace) a session's summary. */
+export function saveSummary(db, summary) {
+    db.prepare(`INSERT INTO summaries(session_id, project, end_time, data) VALUES (?, ?, ?, ?)
+     ON CONFLICT(session_id) DO UPDATE SET project = excluded.project, end_time = excluded.end_time, data = excluded.data`).run(summary.sessionId, summary.project, summary.endTime || 0, JSON.stringify(summary));
 }
 function extractKeyTopics(text) {
     const topics = new Set();

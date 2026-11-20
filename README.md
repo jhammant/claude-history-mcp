@@ -10,62 +10,170 @@ Claude Code starts every session with amnesia. Fixed a gnarly bug last week? Cla
 
 ClaudeHistory fixes this by indexing your existing conversation transcripts and making them searchable.
 
-## Install (30 seconds)
+## Install
 
-Add to `~/.claude/settings.json`:
+1. Install version 2 from GitHub (Node 22 or newer):
+
+```bash
+npm install -g https://github.com/jhammant/claude-history-mcp/archive/refs/heads/main.tar.gz
+```
+
+2. Add the server to `~/.claude/settings.json`:
 
 ```json
 {
   "mcpServers": {
     "history": {
-      "command": "npx",
-      "args": ["-y", "claude-history-mcp"]
+      "command": "claude-history-mcp"
     }
   }
 }
 ```
 
-Restart Claude Code. Done.
+3. Build the history database once (a few minutes for a large history):
+
+```bash
+claude-history-mcp sweep
+```
+
+4. Schedule the same command to run every night (cron, launchd or any scheduler), so the
+   database keeps up with new sessions. Restart Claude Code. Done.
+
+Until the database exists, every tool answers with the command to run instead of building
+an index inside a tool call.
+
+### Session-start context
+
+After `npm run build`, register `node /absolute/path/to/claude-history-mcp/dist/hooks/session-start-hook.js`
+as a `SessionStart` command in Claude Code's `~/.claude/settings.json` or Codex's
+`~/.codex/hooks.json`. The hook returns recent project context as JSON using
+`hookSpecificOutput.additionalContext`, which both clients accept. It emits nothing
+when no context is available (or the database is missing or busy). Context starting
+with `[ClaudeHistory]` stays inside the JSON string so Codex does not mistake the prefix
+for a JSON array. It reads two small indexed tables and takes a few tens of milliseconds.
 
 ## How It Works
 
-```
-~/.claude/projects/          ClaudeHistory MCP           Claude Code
-┌─────────────────┐        ┌──────────────────┐        ┌──────────┐
-│ Session JSONL    │───────▶│ Index + Search    │◀──────▶│ 7 Tools  │
-│ files (already   │  read  │ BM25 + TF-IDF    │ query  │ available│
-│ on your disk)    │  only  │ Knowledge Extract │        │ to Claude│
-└─────────────────┘        └──────────────────┘        └──────────┘
-                                    │
-                           (optional, off by default)
-                                    │
-                                    ▼
-                           ┌──────────────────┐
-                           │ Cloud Sync Server │
-                           │ (self-host or     │
-                           │  hosted version)  │
-                           └──────────────────┘
+```text
+~/.claude/projects/**.jsonl   ──┐   sweep (nightly)        ┌───────────────────────────┐
+  sessions + subagent runs      ├──────────────────────────▶ ~/.claude-history-mcp/     │
+~/.codex/transcript-feed/     ──┘   top-up (at query time,  │   history.db  (SQLite)    │
+  projects/**.jsonl                 ≤300 ms, newest first)  │   messages + FTS5 index   │
+                                                            │   sessions, summaries,    │
+                                                            │   knowledge               │
+                                                            └─────────────▲─────────────┘
+                                                                          │ read
+                                              one MCP server per Claude Code / Codex session
 ```
 
-**Step 1:** Claude Code already saves every conversation as JSONL files in `~/.claude/projects/`. You have these right now.
+**Transcripts.** Claude Code saves every conversation as JSONL under `~/.claude/projects/`
+(subagent runs under `<session>/subagents/`); the optional Codex feed lives under
+`~/.codex/transcript-feed/projects/`.
 
-**Step 2:** ClaudeHistory reads these files and builds a search index. Pure heuristics — BM25 ranking, TF-IDF scoring, Reciprocal Rank Fusion. No LLM calls. No API keys needed.
+**One database.** `history.db` holds one row per message: the prose, the tool names, and
+the tool activity (commands, file paths, search patterns, and tool results capped at about
+2,000 characters each, binary data dropped). Thinking blocks and `<system-reminder>`
+blocks are left out. Calls to this server's own tools keep their name, but neither their
+input nor their result is indexed, so a past search for X never becomes a hit for X.
+An SQLite FTS5 index (porter stemming) covers prose and tool activity. Subagent runs are
+their own sessions, with ids like `agent-<id>@<parent session id>`.
 
-**Step 3:** Claude Code can now search your history using 7 MCP tools automatically.
+**Incremental.** Transcripts are append-only, so the sweep reads only the bytes added since
+the last run, up to the last complete line. A file that shrank or was replaced is read
+again from the start. Two indexers working on one file at once cannot insert anything
+twice: each batch re-checks the stored offset inside its write transaction.
 
-**Step 4 (optional):** Enable cloud sync to share knowledge across devices or with your team. Only extracted patterns sync — never raw transcripts or source code.
+**Nothing runs in the background.** There is no daemon, watcher or timer. Freshness comes
+from the scheduled sweep, plus a short top-up a server may do before a search (transcripts
+changed since the last sweep, newest first, within about 300 ms, at most every 20 seconds).
+When it cannot catch up, the search result says so in one line.
+
+**Thin servers.** A server opens the database on its first tool call and runs SQL; it keeps
+no index in memory, so each copy uses tens of MB rather than GBs.
+
+**History outlives transcripts.** Claude Code deletes transcripts after about 30 days.
+The database never drops a session because its file has gone, so it becomes the long-term
+archive; `read_session` opens those sessions too.
+
+## Commands
+
+```bash
+node dist/index.js                       # the MCP server (stdio); what Claude Code runs
+node dist/index.js sweep [--json]        # index what changed, refresh summaries; alias: index
+node dist/index.js status [--json]       # size, sessions, messages, oldest/newest, files behind, last sweep
+node dist/index.js search "<query>" [--limit N] [--project P] [--context] [--sort recent] [--timing] [--no-topup]
+node dist/index.js rebuild [--json]      # build a fresh database beside the old one and swap it in
+node dist/index.js import-legacy         # one-time import from the version 1 index (see below)
+npm run build-index                      # same as sweep, from the TypeScript sources
+```
+
+`sweep` prints one line of totals and exits 0 on success (non-zero on failure). It is safe
+to run while servers are reading, and a second sweep started while one is running exits
+cleanly. It also applies schema upgrades after an update (servers never migrate inside a
+tool call: on an outdated database they answer with the command to run). It compacts the
+file (`VACUUM`, about 10 s for a large history) after a migration, or once a tenth of the
+messages are new since the last compaction: keeping each table in one place roughly halves
+the time of a search on a cold disk cache. `rebuild` keeps every session whose transcript no longer exists, and swaps the
+new database in with SQLite's online backup, so open servers simply see the new data.
+
+### Upgrading from version 1 (index.msgpack)
+
+Version 1 (0.x) kept an in-memory index in `~/.claude-history-mcp/index.msgpack`, which
+may be the only copy of sessions whose transcripts Claude Code has since deleted. Import
+it once, after the first sweep and not alongside another heavy job:
+
+```bash
+node dist/index.js import-legacy
+```
+
+It imports the old index's sessions that have no transcript on disk (as archived chunks),
+every file in `summaries/`, and `knowledge.json`. Running it again changes nothing. The
+old index unpacks to several GB, so the command re-launches itself with a larger heap.
+The old files are left in place; delete them yourself once you are happy.
+
+### Environment variables
+
+| Variable | Default | What it sets |
+|----------|---------|--------------|
+| `CLAUDE_HISTORY_DATA_DIR` | `~/.claude-history-mcp` | Where `history.db` lives |
+| `CLAUDE_HISTORY_CLAUDE_DIR` | `~/.claude` | Claude Code's config dir (settings, commands) |
+| `CLAUDE_HISTORY_PROJECTS_DIR` | `<claude dir>/projects` | Claude Code transcripts |
+| `CODEX_TRANSCRIPT_FEED` | `<CODEX_HOME>/transcript-feed` | Codex feed root (reads its `projects/`) |
+| `CODEX_HOME` | `~/.codex` | Codex home |
+| `CLAUDE_HISTORY_TOPUP_MS` | `300` | Query-time indexing budget in ms; `0` turns it off |
 
 ## What Claude Can Do With It
 
 | Tool | What It Does | Example |
 |------|-------------|---------|
-| `search_history` | Full-text search with filters | `"docker error project:myapp after:7d"` |
+| `search_history` | Full-text search, grouped by session, with snippets around the matched words | `"docker error project:myapp after:7d"` |
+| `read_session` | Page through one session's messages, even after its transcript is deleted | `session_id, around: 57` |
 | `find_solutions` | Find past fixes for similar problems | `"ECONNREFUSED port conflict"` |
 | `find_patterns` | Discover recurring issues across projects | Shows you keep hitting the same bugs |
 | `get_session_summary` | Summarise any past session | Quick context on what happened |
-| `list_projects` | See all projects with session counts | Overview of your work |
-| `get_project_context` | Full context for a project | Recent decisions, solutions, patterns |
-| `search_community_knowledge` | Search shared patterns (opt-in) | What other devs do for similar problems |
+| `list_projects` | List projects with session counts, newest first (30 by default; `limit` and `query` narrow it) | Overview of your work |
+| `get_project_context` | Context for a project | Recent sessions, decisions, fixes |
+
+### Search syntax
+
+- All words must match; when that finds too few sessions, partial matches fill the rest
+  (marked "partial match"), ranked by how much of the query they contain.
+- `"exact phrase"`, `redis OR memcached`.
+- Identifiers work as typed: `index.msgpack`, `ERR_SQLITE_ERROR`, `src/server.ts`.
+- Filters: `project:` `branch:` `tool:Bash` `role:user|assistant|tool` `source:claude|codex`
+  `session:<id>` `after:7d` `before:2026-01-15` (relative `h/d/w/m/y`, ISO dates, `today`).
+  `session:` takes a session id or prefix: a parent session's id also covers its subagents,
+  and `session:agent-<id>` finds that subagent under every parent.
+- Each hit is labelled with its working directory (home shown as `~`), the date, the
+  session id and the message number.
+- `sort: "recent"` orders by date instead of relevance; `include_context: true` adds the
+  messages either side of each hit.
+
+Ranking is FTS5 `bm25()` with prose weighted above tool input, above tool output, a mild
+recency boost, a boost for the project you are in, and a small penalty for subagent runs.
+Filters are applied before ranking and limiting; filters on sessions (project, branch,
+source, session, dates) and on role run inside the full-text query itself when they narrow
+the search to about a hundred sessions or fewer.
 
 ## Learnings System
 
@@ -112,7 +220,7 @@ Your own memory always ranks first. Team fills gaps. Community validates pattern
 ## Privacy & Security
 
 - **Local by default** — no network calls unless you configure cloud sync
-- **No LLM calls** — pure heuristic search (BM25 + TF-IDF)
+- **No LLM calls** — SQLite full-text search (FTS5, bm25 ranking)
 - **Source code never leaves your machine** — only structured patterns sync
 - **Cloud sync is E2E encrypted**
 - **Federation uses differential privacy** with k-anonymity (3+ contributors)
@@ -120,16 +228,27 @@ Your own memory always ranks first. Team fills gaps. Community validates pattern
 
 ## Performance
 
-- Indexes ~170 sessions in ~9 seconds
-- Searches complete in <200ms
-- 2 runtime dependencies
-- Zero config required
+Measured on one developer's history (about 6,000 transcripts, 9 GB of JSONL, 225,000
+messages) on an Apple-silicon Mac under load:
+
+| What | Result |
+|------|--------|
+| First full build | about 3 minutes, peak memory 350 MB, database 730 MB |
+| Nightly sweep, nothing changed | 0.3 s |
+| Sweep after a line is appended to a 215 MB transcript | 0.1 s |
+| Search, warm (p50 / p95) | 6 ms / 39 ms |
+| Search, new process incl. Node start-up (p50 / p95) | 130 ms / 170 ms |
+| Server memory after ten searches | about 120 MB |
+| Session-start hook | about 70–85 ms, Node start-up included |
+
+Two runtime dependencies besides the MCP SDK: `better-sqlite3` (pinned) and `zod`.
+`msgpackr` is only loaded by `import-legacy`.
 
 ## Links
 
 - **MCP Client (this repo):** MIT license — use it however you want
 - **Cloud Server:** [github.com/jhammant/claude-history-cloud](https://github.com/jhammant/claude-history-cloud) (AGPL)
-- **npm:** `npm i claude-history-mcp`
+- **npm:** `claude-history-mcp` (still version 1; install version 2 from GitHub as above)
 
 ## License
 

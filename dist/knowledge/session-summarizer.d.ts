@@ -2,7 +2,8 @@
  * Heuristic session summarizer — no LLM needed.
  * Generates structured summaries from parsed session data.
  */
-import type { ParsedSession } from "../parsers/session-parser.js";
+import type { DB } from "../db/database.js";
+import type { ParsedSession } from "./parsed-session.js";
 export interface SessionSummary {
     sessionId: string;
     project: string;
@@ -23,12 +24,6 @@ export interface SessionSummary {
  * Generate a heuristic summary for a session.
  */
 export declare function summarizeSession(session: ParsedSession): SessionSummary;
-/**
- * Cache a session summary to disk.
- */
-export declare function cacheSummary(summary: SessionSummary): void;
-/**
- * Load a cached summary.
- */
-export declare function loadCachedSummary(sessionId: string): SessionSummary | null;
+/** Store (or replace) a session's summary. */
+export declare function saveSummary(db: DB, summary: SessionSummary): void;
 //# sourceMappingURL=session-summarizer.d.ts.map

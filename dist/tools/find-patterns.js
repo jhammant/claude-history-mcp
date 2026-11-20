@@ -1,32 +1,29 @@
-import { parseHistoryFile, groupBySession, } from "../parsers/history-parser.js";
-import { extractProjectName } from "../utils/path-encoder.js";
-export const findPatternsTool = {
-    name: "find_patterns",
-    description: "Discover recurring patterns in conversation history: common topics, frequent workflows, repeated issues.",
-    inputSchema: {
-        type: "object",
-        properties: {
-            project: {
-                type: "string",
-                description: "Limit to a specific project",
-            },
-            type: {
-                type: "string",
-                enum: ["topics", "workflows", "issues", "all"],
-                description: "Type of patterns to find (default: all)",
-            },
-        },
-    },
-};
-export function handleFindPatterns(args) {
-    const entries = parseHistoryFile();
-    const patternType = args.type || "all";
-    let filtered = entries;
-    if (args.project) {
-        const query = args.project.toLowerCase();
-        filtered = entries.filter((e) => e.project.toLowerCase().includes(query) ||
-            extractProjectName(e.project).toLowerCase().includes(query));
+import { inList, matchProjects } from "./project-match.js";
+/** The newest user prompts (top-level sessions only), optionally for some projects. */
+function loadPrompts(db, projects) {
+    const list = projects ? inList(projects) : null;
+    return db
+        .prepare(`SELECT t.prose AS display, coalesce(m.ts, 0) AS timestamp, s.project, s.id AS sessionId
+       FROM messages m JOIN sessions s ON s.sid = m.session_sid JOIN message_text t ON t.id = m.id
+       WHERE m.role = 'user' AND s.is_subagent = 0 ${list ? `AND s.project IN (${list.sql})` : ""}
+       ORDER BY m.ts DESC LIMIT 20000`)
+        .all(...(list?.params ?? []));
+}
+function groupBySession(entries) {
+    const groups = new Map();
+    for (const entry of entries) {
+        const group = groups.get(entry.sessionId);
+        if (group)
+            group.push(entry);
+        else
+            groups.set(entry.sessionId, [entry]);
     }
+    return groups;
+}
+export function handleFindPatterns(db, args) {
+    const patternType = args.type || "all";
+    const projects = args.project ? matchProjects(db, args.project) : null;
+    const filtered = projects && projects.length === 0 ? [] : loadPrompts(db, projects);
     if (filtered.length === 0) {
         return args.project
             ? `No history found for project "${args.project}".`

@@ -1,95 +1,79 @@
 #!/usr/bin/env node
 /**
- * Session-start hook: auto-inject project context on new Claude Code session.
+ * Session-start hook: auto-inject project context in Claude Code and Codex.
  *
- * Reads pre-computed summaries and knowledge directly from ~/.claude-history-mcp/
- * and outputs brief context to stdout. Target: <200ms.
+ * Reads the latest session summaries and extracted knowledge for the current project
+ * from the history database (indexed queries, read-only) and prints one hook JSON
+ * object to stdout. Prints nothing when there is no context, and exits silently when
+ * the database is missing, locked or unreadable. Target: well under 200 ms.
  *
- * Register in ~/.claude/settings.json as a SessionStart hook.
+ * Register as a SessionStart command hook in Claude Code or Codex.
  */
-import { existsSync, readdirSync, readFileSync } from "fs";
-import { join } from "path";
-import { encodeProjectPath, extractProjectName } from "../utils/path-encoder.js";
+import Database from "better-sqlite3";
+import { existsSync } from "fs";
 import { CONFIG } from "../config.js";
-function main() {
-    const cwd = process.cwd();
-    const projectDir = encodeProjectPath(cwd);
-    const projectName = extractProjectName(cwd);
-    // Load recent summaries for this project
-    const summaries = loadProjectSummaries(projectDir);
-    const knowledge = loadProjectKnowledge(projectDir);
-    if (summaries.length === 0 && knowledge.length === 0) {
-        // No context to inject
-        return;
-    }
-    const lines = [`[ClaudeHistory] Previous context for ${projectName}:`];
-    // Show last 3 session summaries
-    for (const summary of summaries.slice(0, 3)) {
-        const daysAgo = Math.floor((Date.now() - summary.endTime) / 86400000);
-        const timeStr = daysAgo === 0
-            ? "today"
-            : daysAgo === 1
-                ? "yesterday"
-                : `${daysAgo} days ago`;
-        const topic = summary.topic.length > 80
-            ? summary.topic.slice(0, 80) + "..."
-            : summary.topic;
-        lines.push(`- Last session (${timeStr}): ${topic}`);
-    }
-    // Show key decisions/solutions
-    const decisions = knowledge.filter((k) => k.type === "decision").slice(0, 2);
-    for (const d of decisions) {
-        lines.push(`- Key decision: ${d.summary}`);
-    }
-    const solutions = knowledge.filter((k) => k.type === "solution").slice(0, 2);
-    for (const s of solutions) {
-        lines.push(`- Solution found: ${s.summary}`);
-    }
-    // Show unresolved issues (errors without fixes)
-    const errorFixes = knowledge.filter((k) => k.type === "error_fix").slice(0, 1);
-    for (const ef of errorFixes) {
-        lines.push(`- Error fix: ${ef.summary}`);
-    }
-    if (lines.length > 1) {
-        console.log(lines.join("\n"));
-    }
+import { encodeProjectPath, extractProjectName } from "../utils/path-encoder.js";
+function timeAgo(endTime) {
+    const daysAgo = Math.floor((Date.now() - endTime) / 86_400_000);
+    return daysAgo <= 0 ? "today" : daysAgo === 1 ? "yesterday" : `${daysAgo} days ago`;
 }
-function loadProjectSummaries(projectDir) {
-    const summariesDir = CONFIG.summariesDir;
-    if (!existsSync(summariesDir))
-        return [];
-    const summaries = [];
+function buildContext(db, cwd) {
+    const projectDir = encodeProjectPath(cwd);
+    // The project's own dir and any dir beneath it, newest first, via the (project, ...) indexes.
+    const upper = projectDir + "￿";
+    const summaries = db
+        .prepare("SELECT data FROM summaries WHERE project >= ? AND project < ? ORDER BY end_time DESC LIMIT 3")
+        .all(projectDir, upper).flatMap((row) => {
+        try {
+            const summary = JSON.parse(row.data);
+            return typeof summary.topic === "string" ? [{ topic: summary.topic, endTime: Number(summary.endTime) || 0 }] : [];
+        }
+        catch {
+            return [];
+        }
+    });
+    const knowledge = db.prepare("SELECT summary FROM knowledge WHERE project >= ? AND project < ? AND type = ? ORDER BY ts DESC LIMIT ?");
+    const of = (type, limit) => knowledge.all(projectDir, upper, type, limit).map((k) => k.summary);
+    const lines = [`[ClaudeHistory] Previous context for ${extractProjectName(cwd)}:`];
+    for (const summary of summaries) {
+        const topic = summary.topic.length > 80 ? summary.topic.slice(0, 80) + "..." : summary.topic;
+        lines.push(`- Last session (${timeAgo(summary.endTime)}): ${topic}`);
+    }
+    for (const d of of("decision", 2))
+        lines.push(`- Key decision: ${d}`);
+    for (const s of of("solution", 2))
+        lines.push(`- Solution found: ${s}`);
+    for (const e of of("error_fix", 1))
+        lines.push(`- Error fix: ${e}`);
+    return lines.length > 1 ? lines.join("\n") : null;
+}
+function main() {
+    let db;
     try {
-        for (const file of readdirSync(summariesDir)) {
-            if (!file.endsWith(".json"))
-                continue;
-            try {
-                const data = JSON.parse(readFileSync(join(summariesDir, file), "utf-8"));
-                if (data.project === projectDir || data.project.includes(projectDir)) {
-                    summaries.push(data);
-                }
-            }
-            catch {
-                continue;
-            }
+        const path = CONFIG.databaseFile;
+        if (!existsSync(path))
+            return;
+        db = new Database(path, { readonly: true, fileMustExist: true, timeout: 50 });
+        const context = buildContext(db, process.cwd());
+        if (context) {
+            console.log(JSON.stringify({
+                hookSpecificOutput: {
+                    hookEventName: "SessionStart",
+                    additionalContext: context,
+                },
+            }));
         }
     }
     catch {
-        return [];
+        // Missing, locked or damaged database: no context this time, and never an error.
     }
-    return summaries.sort((a, b) => b.endTime - a.endTime);
-}
-function loadProjectKnowledge(projectDir) {
-    if (!existsSync(CONFIG.knowledgeFile))
-        return [];
-    try {
-        const entries = JSON.parse(readFileSync(CONFIG.knowledgeFile, "utf-8"));
-        return entries
-            .filter((e) => e.project === projectDir || e.project.includes(projectDir))
-            .sort((a, b) => b.timestamp - a.timestamp);
-    }
-    catch {
-        return [];
+    finally {
+        try {
+            db?.close();
+        }
+        catch {
+            // already closed
+        }
     }
 }
 main();

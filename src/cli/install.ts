@@ -18,7 +18,7 @@ function main(): void {
 
   console.log("\nInstallation complete!");
   console.log("Next steps:");
-  console.log("  1. Run 'npm run build-index' to build the initial search index");
+  console.log("  1. Run 'npm run build-index' (or: node dist/index.js sweep) to build the history database");
   console.log("  2. Add the MCP server to your Claude Code config:");
   console.log('     claude mcp add claude-history -- node "' + resolve("dist/index.js") + '"');
 }
@@ -79,13 +79,8 @@ function installSkill(): void {
 }
 
 function ensureDataDir(): void {
-  const dirs = [CONFIG.dataDir, CONFIG.summariesDir];
-  for (const dir of dirs) {
-    if (!existsSync(dir)) {
-      mkdirSync(dir, { recursive: true });
-    }
-  }
-  console.log("Data directory ensured at ~/.claude-history-mcp/");
+  if (!existsSync(CONFIG.dataDir)) mkdirSync(CONFIG.dataDir, { recursive: true });
+  console.log(`Data directory ensured at ${CONFIG.dataDir}`);
 }
 
 main();

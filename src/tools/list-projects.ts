@@ -1,65 +1,78 @@
-import { parseHistoryFile, getProjectInfos } from "../parsers/history-parser.js";
-import { extractProjectName } from "../utils/path-encoder.js";
+import type { DB } from "../db/database.js";
+import { formatDateTime, projectName } from "../search/format.js";
+import { decodeProjectPath } from "../utils/path-encoder.js";
 
-export const listProjectsTool = {
-  name: "list_projects",
-  description:
-    "List all projects that have Claude Code conversation history, with session counts and activity dates.",
-  inputSchema: {
-    type: "object" as const,
-    properties: {
-      sort_by: {
-        type: "string",
-        enum: ["recent", "sessions", "messages", "name"],
-        description: "Sort order (default: recent)",
-      },
-    },
-  },
-};
+interface ProjectRow {
+  project: string;
+  cwd: string | null;
+  sessions: number;
+  subagents: number;
+  codex: number;
+  messages: number;
+  first: number | null;
+  last: number | null;
+}
 
-export function handleListProjects(args: { sort_by?: string }): string {
-  const entries = parseHistoryFile();
-  const infos = getProjectInfos(entries);
+const DEFAULT_LIMIT = 30;
+const MAX_LIMIT = 200;
 
-  if (infos.length === 0) {
-    return "No projects with conversation history found.";
-  }
+/**
+ * Projects with history, newest first by default. Capped, because a long-lived database
+ * holds hundreds of projects and the caller is a model with a context budget.
+ */
+export function handleListProjects(db: DB, args: { sort_by?: string; limit?: number; query?: string }): string {
+  const all = db
+    .prepare(
+      `SELECT project, max(cwd) AS cwd,
+         sum(is_subagent = 0) AS sessions, sum(is_subagent) AS subagents, sum(source = 'codex') AS codex,
+         sum(message_count) AS messages, min(start_time) AS first, max(end_time) AS last
+       FROM sessions GROUP BY project`
+    )
+    .all() as ProjectRow[];
+  if (all.length === 0) return "No projects with conversation history found.";
 
-  // Sort
-  const sortBy = args.sort_by || "recent";
-  switch (sortBy) {
+  const query = args.query?.trim().toLowerCase();
+  const rows = query
+    ? all.filter((r) => r.project.toLowerCase().includes(query) || (r.cwd ?? "").toLowerCase().includes(query))
+    : all;
+  if (rows.length === 0) return `No projects match "${args.query}" (${all.length} projects have history).`;
+
+  switch (args.sort_by ?? "recent") {
     case "sessions":
-      infos.sort((a, b) => b.sessionCount - a.sessionCount);
+      rows.sort((a, b) => b.sessions - a.sessions);
       break;
     case "messages":
-      infos.sort((a, b) => b.messageCount - a.messageCount);
+      rows.sort((a, b) => b.messages - a.messages);
       break;
     case "name":
-      infos.sort((a, b) => a.path.localeCompare(b.path));
+      rows.sort((a, b) => projectName(a.project, a.cwd).localeCompare(projectName(b.project, b.cwd)));
       break;
-    case "recent":
     default:
-      infos.sort((a, b) => b.lastActivity - a.lastActivity);
-      break;
+      rows.sort((a, b) => (b.last ?? 0) - (a.last ?? 0));
   }
 
-  const lines: string[] = [`${infos.length} projects with conversation history:\n`];
-
-  for (const info of infos) {
-    const name = extractProjectName(info.path);
-    const lastDate = info.lastActivity
-      ? new Date(info.lastActivity).toLocaleDateString()
-      : "unknown";
-    const firstDate = info.firstActivity
-      ? new Date(info.firstActivity).toLocaleDateString()
-      : "unknown";
-
+  const limit = Math.max(1, Math.min(Math.floor(args.limit ?? DEFAULT_LIMIT), MAX_LIMIT));
+  const shown = rows.slice(0, limit);
+  const lines = [
+    `${rows.length} project${rows.length === 1 ? "" : "s"} with conversation history` +
+      (query ? ` matching "${args.query}"` : "") +
+      (shown.length < rows.length ? `, showing ${shown.length}:` : ":"),
+    "",
+  ];
+  for (const row of shown) {
+    const extras = [
+      row.subagents ? `${row.subagents} subagent runs` : "",
+      row.codex ? `${row.codex} Codex` : "",
+    ].filter(Boolean);
     lines.push(
-      `- **${name}** — ${info.sessionCount} sessions, ${info.messageCount} messages`
+      `- ${projectName(row.project, row.cwd)} — ${row.sessions} sessions, ${row.messages} messages` +
+        (extras.length ? ` (${extras.join(", ")})` : "")
     );
-    lines.push(`  Path: ${info.path}`);
-    lines.push(`  Active: ${firstDate} → ${lastDate}`);
+    if (!row.cwd) lines.push(`  Path (decoded, approximate): ${decodeProjectPath(row.project)}`);
+    lines.push(`  Active: ${formatDateTime(row.first).slice(0, 10)} → ${formatDateTime(row.last).slice(0, 10)}`);
   }
-
+  if (shown.length < rows.length) {
+    lines.push("", `${rows.length - shown.length} more not shown. Narrow with query, or raise limit (max ${MAX_LIMIT}).`);
+  }
   return lines.join("\n");
 }

@@ -1,116 +1,48 @@
-import { existsSync, readdirSync } from "fs";
-import { join } from "path";
-import { CONFIG } from "../config.js";
-import {
-  parseSessionFile,
-  type ParsedSession,
-} from "../parsers/session-parser.js";
-import {
-  parseHistoryFile,
-  groupBySession,
-} from "../parsers/history-parser.js";
-import { extractProjectName } from "../utils/path-encoder.js";
+import type { DB } from "../db/database.js";
+import { loadParsedSession, type ParsedSession } from "../knowledge/parsed-session.js";
+import { resolveSession } from "../sessions/read-session.js";
+import { formatDateTime, projectName } from "../search/format.js";
+import { inList, matchProjects } from "./project-match.js";
 
-export const getSessionSummaryTool = {
-  name: "get_session_summary",
-  description:
-    "Get a structured summary of a conversation session. Provide either a session ID or project name (returns most recent session for the project).",
-  inputSchema: {
-    type: "object" as const,
-    properties: {
-      session_id: {
-        type: "string",
-        description: "Specific session UUID",
-      },
-      project: {
-        type: "string",
-        description:
-          "Project name or path. Returns summary of most recent session.",
-      },
-    },
-  },
-};
-
-export function handleGetSessionSummary(args: {
-  session_id?: string;
-  project?: string;
-}): string {
+export function handleGetSessionSummary(db: DB, args: { session_id?: string; project?: string }): string {
   if (!args.session_id && !args.project) {
     return "Please provide either session_id or project.";
   }
 
-  let session: ParsedSession | null = null;
-
+  let sid: number | undefined;
   if (args.session_id) {
-    session = findSessionById(args.session_id);
+    const found = resolveSession(db, args.session_id);
+    if (found && "ambiguous" in found) {
+      return `"${args.session_id}" matches several sessions: ${found.ambiguous.join(", ")}.`;
+    }
+    sid = found?.sid;
   } else if (args.project) {
-    session = findLatestSessionForProject(args.project);
+    const projects = matchProjects(db, args.project);
+    if (projects.length) {
+      const list = inList(projects);
+      const row = db
+        .prepare(
+          `SELECT sid FROM sessions WHERE project IN (${list.sql}) AND is_subagent = 0
+           ORDER BY end_time DESC LIMIT 1`
+        )
+        .get(...list.params) as { sid: number } | undefined;
+      sid = row?.sid;
+    }
   }
 
+  const session = sid === undefined ? null : loadParsedSession(db, sid);
   if (!session) {
     return args.session_id
       ? `Session ${args.session_id} not found.`
       : `No sessions found for project "${args.project}".`;
   }
-
   return formatSessionSummary(session);
 }
 
-function findSessionById(sessionId: string): ParsedSession | null {
-  const projectsDir = CONFIG.projectsDir;
-  if (!existsSync(projectsDir)) return null;
-
-  for (const projectDir of readdirSync(projectsDir)) {
-    const filePath = join(projectsDir, projectDir, `${sessionId}.jsonl`);
-    if (existsSync(filePath)) {
-      return parseSessionFile(filePath, projectDir);
-    }
-  }
-  return null;
-}
-
-function findLatestSessionForProject(
-  projectQuery: string
-): ParsedSession | null {
-  const entries = parseHistoryFile();
-  const query = projectQuery.toLowerCase();
-
-  // Find matching project entries
-  const matching = entries.filter(
-    (e) =>
-      e.project.toLowerCase().includes(query) ||
-      extractProjectName(e.project).toLowerCase().includes(query)
-  );
-
-  if (matching.length === 0) return null;
-
-  // Group by session and find most recent
-  const bySession = groupBySession(matching);
-  let latestSessionId = "";
-  let latestTimestamp = 0;
-  let latestProject = "";
-
-  for (const [sessionId, sessionEntries] of bySession) {
-    const maxTs = Math.max(...sessionEntries.map((e) => e.timestamp));
-    if (maxTs > latestTimestamp) {
-      latestTimestamp = maxTs;
-      latestSessionId = sessionId;
-      latestProject = sessionEntries[0].project;
-    }
-  }
-
-  if (!latestSessionId) return null;
-  return findSessionById(latestSessionId);
-}
-
 function formatSessionSummary(session: ParsedSession): string {
-  const projectName = extractProjectName(session.project);
-  const startDate = session.startTime
-    ? new Date(session.startTime).toLocaleString()
-    : "unknown";
-  const endDate = session.endTime
-    ? new Date(session.endTime).toLocaleString()
-    : "unknown";
+  const name = projectName(session.project, session.cwd);
+  const startDate = formatDateTime(session.startTime);
+  const endDate = formatDateTime(session.endTime);
 
   const userMessages = session.messages.filter((m) => m.role === "user");
   const assistantMessages = session.messages.filter(
@@ -123,20 +55,21 @@ function formatSessionSummary(session: ParsedSession): string {
   const topic =
     userMessages.length > 0
       ? userMessages[0].text.slice(0, 200)
-      : "Unknown topic";
+      : session.messages[0]?.text.slice(0, 200) || "Unknown topic";
 
   // Extract key topics from user messages
   const userTexts = userMessages.map((m) => m.text).join(" ");
   const keyPhrases = extractKeyPhrases(userTexts);
 
   const lines: string[] = [
-    `## Session Summary: ${projectName}`,
+    `## Session Summary: ${name}`,
     "",
     `**Session ID**: ${session.sessionId}`,
-    `**Project**: ${session.project}`,
+    `**Project**: ${name}`,
     `**Branch**: ${session.gitBranch || "unknown"}`,
     `**Time**: ${startDate} → ${endDate}`,
     `**Messages**: ${userMessages.length} user, ${assistantMessages.length} assistant`,
+    `**Read it**: read_session(session_id="${session.sessionId}")`,
     "",
     `### Initial Topic`,
     topic,

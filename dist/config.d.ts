@@ -1,37 +1,46 @@
 export declare const CONFIG: {
     readonly claudeDir: string;
-    readonly historyFile: string;
     readonly projectsDir: string;
+    readonly codexProjectsDir: string;
     readonly settingsFile: string;
     readonly dataDir: string;
-    readonly indexFile: string;
-    readonly knowledgeFile: string;
-    readonly summariesDir: string;
-    readonly metaFile: string;
-    readonly bm25: {
-        readonly k1: 1.2;
-        readonly b: 0.75;
+    readonly databaseFile: string;
+    /** Files of the pre-SQLite store, read only by `import-legacy`. */
+    legacy: {
+        readonly indexFile: string;
+        readonly knowledgeFile: string;
+        readonly summariesDir: string;
     };
-    readonly tfidf: {
-        readonly maxTerms: 10000;
+    /** Query-time top-up: index transcripts changed since the last sweep within this budget. */
+    readonly topUpBudgetMs: number;
+    topUpIntervalMs: number;
+    search: {
+        defaultLimit: number;
+        maxLimit: number;
+        /** Hits considered before grouping by session. */
+        candidateCap: number;
+        /** bm25 column weights: prose, tool input, tool output (the scope column weighs 0). */
+        weights: readonly [1, 0.5, 0.25];
+        /**
+         * Session filters matching at most this many sessions run inside the FTS MATCH.
+         * Measured on a large history: up to ~100 sessions it cuts a cold search from ~170 to
+         * ~65 ms for a few ms when warm; from ~200 the long OR costs more than it saves.
+         */
+        scopeMaxSessions: number;
+        recencyBoost: number;
+        recencyHalfLifeDays: number;
+        currentProjectBoost: number;
+        subagentFactor: number;
+        snippetTokens: number;
     };
-    readonly search: {
-        readonly defaultLimit: 20;
-        readonly maxLimit: 100;
-        readonly contextLines: 3;
-        readonly recencyBoost7d: 1.2;
-        readonly recencyBoost30d: 1.1;
-        readonly projectMatchBoost: 1.3;
-        readonly rrfK: 60;
-    };
-    readonly indexing: {
-        readonly chunkSize: 500;
-        readonly chunkOverlap: 50;
-        readonly maxChunksPerSession: 200;
-    };
-    readonly watcher: {
-        readonly debounceMs: 5000;
-        readonly staleSessionMinutes: 5;
+    /** Caps on what is stored per message (characters). */
+    limits: {
+        prose: number;
+        toolInputEach: number;
+        toolInputTotal: number;
+        toolResultEach: number;
+        toolOutputTotal: number;
+        firstPrompt: number;
     };
 };
 //# sourceMappingURL=config.d.ts.map
