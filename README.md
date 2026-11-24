@@ -118,36 +118,54 @@ Every session records the host it came from and the repository it belongs to, so
 database can hold several machines and `list_projects` can show one project once.
 
 - **Host.** A label on each session, set once by the first machine to deliver it. It is
-  `CLAUDE_HISTORY_HOST`, else the machine's hostname up to its first dot. Search it with
+  `CLAUDE_HISTORY_HOST`, else the machine's hostname up to its first dot. Because it also
+  names this machine's map file, it is cleaned: characters outside `[A-Za-z0-9._-]` become
+  `_`, a leading `.` or `-` becomes `_`, and it is cut to 64 characters. Search it with
   `host:laptop`; `host:unknown` finds sessions indexed before hosts were recorded.
 - **Repository.** The sweep works it out from the first of these that applies:
-  1. the git remote the session itself recorded (Codex does);
+  1. the git remote the session itself recorded, when the session saw git (a branch or a
+     remote) in its own working directory. Only Codex sessions record a remote (the one in
+     the session header); Claude Code and pi sessions record none;
   2. the repository map, a file per machine with one line per directory: the directory,
-     its main repository root and its `origin` URL;
-  3. the remote of another session on the same host that ran in exactly the same directory
-     inside a git work tree;
-  4. worktree folding: `<repo>/.claude/worktrees/<name>` belongs to `<repo>`, and so does
+     its main repository root and its `origin` URL. The row for the session's directory
+     applies, or else the row for the nearest parent directory that has one; it gives both
+     the key and the root, and a row with no usable remote gives a key by host and path;
+  3. the session's own remote when it was recorded for another directory (a Codex session
+     whose first activity was outside the directory its header names), with no map row for
+     the session's directory;
+  4. the remote of another session on the same host that ran in exactly the same directory
+     and saw git there;
+  5. worktree folding: `<repo>/.claude/worktrees/<name>` belongs to `<repo>`, and so does
      `<repo>/.worktrees/<name>` (also `worktrees`; see `CLAUDE_HISTORY_WORKTREE_DIRS`) when
      `<repo>` is known to be a git work tree;
-  5. the working directory itself.
+  6. the working directory itself.
 
   A repository with a remote is keyed `host/owner/name` (for example `example.com/acme/app`)
   and is one repository on every machine. One without a remote is keyed by host and path, so
   the same path on `laptop` and `desktop` is not taken to be one repository unless a git
   remote says so.
 - **What runs.** `sweep` asks git about the working directories of the sessions it indexed
-  (`rev-parse` and `remote get-url`, local commands with a 5 second timeout) and appends the
-  answers to `<data dir>/repo-map/<host>.jsonl`. It makes no network call and prompts for
-  nothing; with git missing or outside a repository it records nothing. The query-time
+  and appends the answers to `<host>.jsonl` in the map directory (`CLAUDE_HISTORY_REPO_MAP_DIR`,
+  default `<data dir>/repo-map`). When the resolution settings change
+  (`CLAUDE_HISTORY_REPO_HOST_ALIASES` or `CLAUDE_HISTORY_WORKTREE_DIRS`), and on the first
+  sweep after the upgrade, it asks about every directory of this host's sessions instead.
+  The git commands are `rev-parse --show-toplevel`, `rev-parse --show-prefix`,
+  `rev-parse --path-format=absolute --git-common-dir`, `rev-parse --is-bare-repository`,
+  `config --get core.worktree` and `remote get-url origin`: all local and read-only, each
+  with a 5 second timeout and with prompts and optional locks turned off. It makes no
+  network call; with git missing or outside a repository it records nothing. The query-time
   top-up never runs git. The map file holds directory paths and remote URLs with any
   credentials removed. `record-repo` (see Commands) writes the same file.
-- **Map files.** Every `*.jsonl` file under the map directory is read on each sweep and its
-  entries apply to the host doing the sweep. Malformed lines, relative paths and `..` paths
-  are ignored, and a newer entry replaces an older one for the same directory.
+- **Map files.** Each sweep reads only this host's own file, `<host>.jsonl` in the map
+  directory. Other files there (another machine's, in a shared or synced folder) are
+  ignored, so one machine's entries never apply to another. Malformed lines, relative paths
+  and `..` paths are ignored, and a newer entry (by its `at` time) replaces an older one for
+  the same directory.
 
-Upgrading: the database migrates in place to schema version 4 on the next `sweep`. Sessions
-indexed earlier show host `unknown` and are grouped by directory until you run
-`claude-history-mcp rebuild`.
+Upgrading: the database migrates in place to schema version 4 on the next `sweep`. A session
+indexed earlier shows host `unknown` until it is next indexed, and until then it is keyed by
+its path alone, with no host or remote; `claude-history-mcp rebuild` re-indexes every session
+whose transcript still exists. Sessions whose transcript is gone keep host `unknown`.
 
 ## Commands
 
@@ -208,8 +226,8 @@ The old files are left in place; delete them yourself once you are happy.
 | `CLAUDE_HISTORY_PI_SESSIONS_DIR` | `~/.pi/agent/sessions` | Native pi session files |
 | `CODEX_HOME` | `~/.codex` | Codex home |
 | `CLAUDE_HISTORY_TOPUP_MS` | `300` | Query-time indexing budget in ms; `0` turns it off |
-| `CLAUDE_HISTORY_HOST` | hostname up to its first dot | Name of this machine, recorded on each session it indexes first |
-| `CLAUDE_HISTORY_REPO_MAP_DIR` | `<data dir>/repo-map` | Directory of per-machine repository maps (`<host>.jsonl`) |
+| `CLAUDE_HISTORY_HOST` | hostname up to its first dot | Name of this machine, recorded on each session it indexes first and naming its map file; cleaned as described under Hosts and repositories |
+| `CLAUDE_HISTORY_REPO_MAP_DIR` | `<data dir>/repo-map` | Directory of per-machine repository maps (`<host>.jsonl`); a sweep reads only its own host's file |
 | `CLAUDE_HISTORY_REPO_HOST_ALIASES` | none | Git host aliases, `a=b,c=d`: remotes on host `a` count as host `b` (for example `git.internal=example.com`) |
 | `CLAUDE_HISTORY_WORKTREE_DIRS` | `.worktrees,worktrees` | Comma-separated folder names that hold a repository's worktrees; set but empty means none |
 
