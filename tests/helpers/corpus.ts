@@ -173,13 +173,18 @@ function rollout(type: string, payload: object, opts: RolloutOpts = {}) {
 
 export function rolloutMeta(
   uuid: string,
-  opts: RolloutOpts & { cwd?: string; branch?: string; repositoryUrl?: string; threadSource?: string; parentThreadId?: string } = {},
+  opts: RolloutOpts & {
+    cwd?: string; branch?: string; threadSource?: string; parentThreadId?: string;
+    /** More payload keys (forked_from_id, subagent_history_start_ordinal, history_mode, source ...). */
+    extra?: Record<string, unknown>;
+  } = {},
 ) {
   return rollout('session_meta', {
     id: uuid, timestamp: opts.timestamp ?? '2026-10-01T09:00:00Z', cwd: opts.cwd ?? '/work/app', originator: 'codex_cli_rs', cli_version: '0.0.0',
-    git: { branch: opts.branch ?? 'main', commit_hash: 'abc', repository_url: opts.repositoryUrl ?? 'https://git.example.org/team/app.git' },
+    git: { branch: opts.branch ?? 'main', commit_hash: 'abc', repository_url: 'https://git.example.org/team/app.git' },
     ...(opts.threadSource ? { thread_source: opts.threadSource } : {}),
     ...(opts.parentThreadId ? { parent_thread_id: opts.parentThreadId } : {}),
+    ...opts.extra,
   }, opts);
 }
 

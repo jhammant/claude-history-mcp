@@ -72,6 +72,8 @@ directly from `~/.codex/sessions/` and pi session files from `~/.pi/agent/sessio
 the older Codex feed (`~/.codex/transcript-feed/projects/`) is still read if present.
 Codex and pi sessions get their project from the working directory they recorded, and
 sit in the same database as `source = codex` and `source = pi`.
+A forked Codex session (a subagent, or a resumed copy) starts by replaying its parent's
+history; the replay is skipped, so only the fork's own messages are indexed under it.
 
 **One database.** `history.db` holds one row per message: the prose, the tool names, and
 the tool activity (commands, file paths, search patterns, and tool results capped at about

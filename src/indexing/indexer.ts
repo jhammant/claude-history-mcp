@@ -215,11 +215,21 @@ export class RowBuilder {
       this.update.customTitle = truncate(obj.customTitle, 200);
       return;
     }
+    // The task a forked Codex subagent was given (see codex-rollout.ts): its first prompt, no row.
+    if (type === "first-prompt" && typeof obj.text === "string") {
+      if (!this.hasFirstPrompt && obj.text.trim()) {
+        this.update.firstPrompt = truncate(obj.text.replace(/\s+/g, " "), CONFIG.limits.firstPrompt);
+        this.hasFirstPrompt = true;
+      }
+      return;
+    }
     if (type !== "user" && type !== "assistant") return;
     if (obj.isMeta === true) return; // injected skill bodies and command caveats, not conversation
 
     const message = obj.message as { content?: unknown; id?: unknown } | undefined;
     if (!message) return;
+    // A cwd the format states for the whole session (a Codex fork's header) wins over the line's.
+    if (typeof obj.sessionCwd === "string" && obj.sessionCwd && !this.update.cwd) this.update.cwd = obj.sessionCwd;
     if (typeof obj.cwd === "string" && obj.cwd && !this.update.cwd) this.update.cwd = obj.cwd;
     if (typeof obj.gitBranch === "string" && obj.gitBranch && !this.update.branch) this.update.branch = obj.gitBranch;
     const ts = parseTimestamp(obj.timestamp);
@@ -445,16 +455,16 @@ export function indexFile(db: DB, file: TranscriptFile, options: IndexFileOption
       const end = batch.end;
       if (end === offset) break;
 
-      for (const line of batch.lines) {
-        if (line.length >= BIG_LINE && !format.isMessageLine(line.subarray(0, 2048).toString("utf8"))) continue;
+      batch.lines.forEach((line, i) => {
+        if (line.length >= BIG_LINE && !format.isMessageLine(line.subarray(0, 2048).toString("utf8"))) return;
         let obj: Record<string, unknown>;
         try {
           obj = JSON.parse(line.toString("utf8"));
         } catch {
-          continue; // a malformed line is skipped, never retried
+          return; // a malformed line is skipped, never retried
         }
-        for (const l of tr.translate(obj)) builder.addLine(l);
-      }
+        for (const l of tr.translate(obj, batch.starts[i])) builder.addLine(l);
+      });
       const rows = builder.drain();
       const update = builder.update;
       builder.update = emptyUpdate();

@@ -56,3 +56,50 @@ export function readFirstLine(path: string): string | null {
     closeSync(fd);
   }
 }
+
+/**
+ * The first `count` lines of a file, each read with readFirstLine's cap: a line whose
+ * newline is not found within FIRST_LINE_MAX bytes (plus the chunk that crosses it) ends
+ * the list, and it and the lines after it are left out. A last line with no newline yet is
+ * included.
+ */
+export function readHeadLines(path: string, count: number): string[] {
+  let fd: number;
+  try {
+    fd = openSync(path, "r");
+  } catch {
+    return [];
+  }
+  const lines: string[] = [];
+  try {
+    let chunks: Buffer[] = [];
+    let total = 0;
+    let position = 0;
+    while (lines.length < count && total < FIRST_LINE_MAX) {
+      const chunk = Buffer.allocUnsafe(64 << 10);
+      const read = readSync(fd, chunk, 0, chunk.length, position);
+      if (read === 0) {
+        if (total > 0) lines.push(Buffer.concat(chunks).toString("utf8"));
+        break;
+      }
+      const data = chunk.subarray(0, read);
+      const newline = data.indexOf(0x0a);
+      if (newline === -1) {
+        chunks.push(data);
+        total += read;
+        position += read;
+        continue;
+      }
+      chunks.push(data.subarray(0, newline));
+      lines.push(Buffer.concat(chunks).toString("utf8"));
+      chunks = [];
+      total = 0;
+      position += newline + 1;
+    }
+    return lines;
+  } catch {
+    return lines;
+  } finally {
+    closeSync(fd);
+  }
+}

@@ -10,8 +10,8 @@ export type FormatId = "claude" | "codex-feed" | "codex-rollout" | "pi";
 export type ClaudeLine = Record<string, unknown>;
 
 export interface LineTranslator {
-  /** Zero or more Claude-shaped lines for one parsed native line. */
-  translate(obj: Record<string, unknown>): ClaudeLine[];
+  /** Zero or more Claude-shaped lines for one parsed native line; `at` is the line's byte offset in the file. */
+  translate(obj: Record<string, unknown>, at?: number): ClaudeLine[];
 }
 
 export interface TranscriptFormat {

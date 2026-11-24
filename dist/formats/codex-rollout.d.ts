@@ -53,10 +53,48 @@
  * session with no messages: its translator emits nothing. Listing cannot tell it from
  * other files without opening each one on every sweep, and the indexer's files table does
  * not know the file until it is indexed once, so the check lives in the translator, which
- * reads the file's first line only on a resumed read.
+ * reads the file's first line (the header) on a resumed read.
  *
- * `agent_message` response items (2026-07 onward) are inter-agent traffic and are skipped:
- * in every surveyed file the assistant's own text is also a `message` record.
+ * Forked rollouts. A fork (a spawned subagent, or a user's fork) starts by writing its
+ * parent's history again, in one burst at fork time, then its own lines. That replay is
+ * the parent's work, so it is never indexed for the fork. Survey of 2,331 local rollouts
+ * (CLI 0.66 to 0.170, 2026-11), structure only:
+ *   - line 0 is the fork's own session_meta (its id, cwd, git; `forked_from_id`, and
+ *     `parent_thread_id` / `source.subagent.thread_spawn` for a subagent); line 1 is
+ *     usually the parent's session_meta, replayed. Only a session_meta with the file's own
+ *     id is read: the replayed one would overwrite the fork's cwd and git with the parent's.
+ *   - `subagent_history_start_ordinal` (history_mode "paginated", 501 forks, plus the
+ *     guardian threads) is the top-level `ordinal` of the first line of the fork's own
+ *     history: an `event_msg` thread_settings_applied in all 501. Every line carries an
+ *     ordinal equal to its line index; lines below it are skipped. Checked against each
+ *     parent's rollout: no response item from the parent's history at or after it.
+ *   - `history_base` (a paginated user fork) names the base thread and the ordinal and byte
+ *     offset its history ends at instead of copying it: the file holds only its own lines.
+ *   - Older forks (history_mode "legacy" or none, CLI 0.118 to 0.147: 70 files, plus 2 CLI
+ *     0.66 files that mark the replay only by the parent's session_meta on line 1) state no
+ *     boundary. There the replay is the burst: from line 1 (the header can be stamped
+ *     earlier), the lines up to the first gap of more than REPLAY_BURST_GAP_MS between two
+ *     stamped lines. The cut is found once per read by scanning the head and kept as a byte
+ *     offset, so a full read, a resumed read and a rebuild cut at the same line whatever the
+ *     later lines' timestamps. Checked against the parent's rollouts it skips exactly the
+ *     parent's history in 67 of 72; in the other 5 (CLI 0.118) it also skips the
+ *     spawn_agent output written in the burst, whose call is the parent's (in the replay).
+ *     This timestamp rule is used only for forks that state no boundary and are not
+ *     history_mode "paginated" (a paginated fork with neither a start ordinal nor
+ *     history_base skips nothing; none was seen).
+ *   - A fork's session cwd is its header's (its first own row is often a call at an exec
+ *     workdir), and a subagent fork's task, sent as an `agent_message` (459 of 573 forks counted without the history_base one; 574 forks in all), is its
+ *     first prompt: see spawnTask().
+ *
+ *   A rollout with neither `forked_from_id` nor another thread's session_meta on line 1 is
+ *   read whole, as before.
+ *
+ * `agent_message` response items (2026-07 onward) are inter-agent traffic and make no row:
+ * in every surveyed file the assistant's own text is also a `message` record. The one
+ * exception is a fork's first one with text, which seeds its first prompt (spawnTask()).
+ *
+ * Timing rule limit: a line with no timestamp, or one stamped earlier, just before the first
+ * gap is cut with the replay. Every read pattern agrees on this; no local file has it.
  */
 import type { TranscriptFormat } from "./types.js";
 /**
@@ -64,6 +102,13 @@ import type { TranscriptFormat } from "./types.js";
  * Found in real files, plus the older wrapper names Codex has used.
  */
 export declare const INJECTED_USER_PREFIXES: readonly string[];
+/**
+ * Lines written in one fork-time burst are this close together. Measured on 573 forked
+ * rollouts (2026-11): the largest gap between consecutive replay lines, from line 1, was
+ * 32 ms (header to line 1: at most 16 ms); the smallest gap before a fork's first own
+ * message or call 666 ms.
+ */
+export declare const REPLAY_BURST_GAP_MS = 250;
 /** True when the output's header or JSON envelope reports a non-zero exit or a failed script. */
 export declare function outputIsError(text: string): boolean;
 export declare const codexRolloutFormat: TranscriptFormat;

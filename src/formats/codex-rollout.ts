@@ -53,17 +53,57 @@
  * session with no messages: its translator emits nothing. Listing cannot tell it from
  * other files without opening each one on every sweep, and the indexer's files table does
  * not know the file until it is indexed once, so the check lives in the translator, which
- * reads the file's first line only on a resumed read.
+ * reads the file's first line (the header) on a resumed read.
  *
- * `agent_message` response items (2026-07 onward) are inter-agent traffic and are skipped:
- * in every surveyed file the assistant's own text is also a `message` record.
+ * Forked rollouts. A fork (a spawned subagent, or a user's fork) starts by writing its
+ * parent's history again, in one burst at fork time, then its own lines. That replay is
+ * the parent's work, so it is never indexed for the fork. Survey of 2,331 local rollouts
+ * (CLI 0.66 to 0.170, 2026-11), structure only:
+ *   - line 0 is the fork's own session_meta (its id, cwd, git; `forked_from_id`, and
+ *     `parent_thread_id` / `source.subagent.thread_spawn` for a subagent); line 1 is
+ *     usually the parent's session_meta, replayed. Only a session_meta with the file's own
+ *     id is read: the replayed one would overwrite the fork's cwd and git with the parent's.
+ *   - `subagent_history_start_ordinal` (history_mode "paginated", 501 forks, plus the
+ *     guardian threads) is the top-level `ordinal` of the first line of the fork's own
+ *     history: an `event_msg` thread_settings_applied in all 501. Every line carries an
+ *     ordinal equal to its line index; lines below it are skipped. Checked against each
+ *     parent's rollout: no response item from the parent's history at or after it.
+ *   - `history_base` (a paginated user fork) names the base thread and the ordinal and byte
+ *     offset its history ends at instead of copying it: the file holds only its own lines.
+ *   - Older forks (history_mode "legacy" or none, CLI 0.118 to 0.147: 70 files, plus 2 CLI
+ *     0.66 files that mark the replay only by the parent's session_meta on line 1) state no
+ *     boundary. There the replay is the burst: from line 1 (the header can be stamped
+ *     earlier), the lines up to the first gap of more than REPLAY_BURST_GAP_MS between two
+ *     stamped lines. The cut is found once per read by scanning the head and kept as a byte
+ *     offset, so a full read, a resumed read and a rebuild cut at the same line whatever the
+ *     later lines' timestamps. Checked against the parent's rollouts it skips exactly the
+ *     parent's history in 67 of 72; in the other 5 (CLI 0.118) it also skips the
+ *     spawn_agent output written in the burst, whose call is the parent's (in the replay).
+ *     This timestamp rule is used only for forks that state no boundary and are not
+ *     history_mode "paginated" (a paginated fork with neither a start ordinal nor
+ *     history_base skips nothing; none was seen).
+ *   - A fork's session cwd is its header's (its first own row is often a call at an exec
+ *     workdir), and a subagent fork's task, sent as an `agent_message` (459 of 573 forks counted without the history_base one; 574 forks in all), is its
+ *     first prompt: see spawnTask().
+ *
+ *   A rollout with neither `forked_from_id` nor another thread's session_meta on line 1 is
+ *   read whole, as before.
+ *
+ * `agent_message` response items (2026-07 onward) are inter-agent traffic and make no row:
+ * in every surveyed file the assistant's own text is also a `message` record. The one
+ * exception is a fork's first one with text, which seeds its first prompt (spawnTask()).
+ *
+ * Timing rule limit: a line with no timestamp, or one stamped earlier, just before the first
+ * gap is cut with the replay. Every read pattern agrees on this; no local file has it.
  */
 
+import { closeSync, openSync } from "fs";
 import { basename, join } from "path";
 import { CONFIG } from "../config.js";
+import { readLines } from "../indexing/line-reader.js";
 import type { TranscriptFile } from "../parsers/transcript-files.js";
 import { UNKNOWN_PROJECT } from "../utils/path-encoder.js";
-import { readDir, readFirstLine, statFile } from "./fs-util.js";
+import { readDir, readHeadLines, statFile } from "./fs-util.js";
 import { scanCell } from "./js-cell.js";
 import type { ClaudeLine, LineTranslator, TranscriptFormat } from "./types.js";
 
@@ -96,16 +136,110 @@ function isGuardianMeta(payload: unknown): boolean {
   return !!payload && typeof payload === "object" && (payload as Record<string, unknown>).thread_source === "guardian_review";
 }
 
-/** The first line's session_meta payload, or null (missing, over the cap, or not a session_meta). */
-function readFirstMeta(path: string): Record<string, unknown> | null {
-  const line = readFirstLine(path);
+function parseMeta(line: string | undefined): Record<string, unknown> | null {
   if (!line) return null;
   try {
-    const first = JSON.parse(line) as Record<string, unknown>;
-    return first.type === "session_meta" ? asRecord(first.payload) : null;
+    const obj = JSON.parse(line) as Record<string, unknown>;
+    return obj.type === "session_meta" ? asRecord(obj.payload) : null;
   } catch {
     return null;
   }
+}
+
+/**
+ * Where a forked rollout's own lines begin. See "Forked rollouts" in the header comment.
+ *   none     nothing to skip (not a fork, or a fork whose history stays in its base file)
+ *   ordinal  skip every line whose `ordinal` is below `start` (the file states it)
+ *   burst    skip the lines before byte offset `end`, written in the fork-time burst (old
+ *            files that state nothing)
+ */
+type Replay = { kind: "none" } | { kind: "ordinal"; start: number } | { kind: "burst"; end: number };
+
+/**
+ * Lines written in one fork-time burst are this close together. Measured on 573 forked
+ * rollouts (2026-11): the largest gap between consecutive replay lines, from line 1, was
+ * 32 ms (header to line 1: at most 16 ms); the smallest gap before a fork's first own
+ * message or call 666 ms.
+ */
+export const REPLAY_BURST_GAP_MS = 250;
+
+function parseTs(value: unknown): number | null {
+  if (typeof value !== "string") return null;
+  const ms = Date.parse(value);
+  return Number.isNaN(ms) ? null : ms;
+}
+
+const LEADING_TS = /^\{"timestamp":"([^"]{1,64})"/;
+/** A line without a leading timestamp is parsed for one only up to this size. */
+const REPLAY_SCAN_LINE_MAX = 1 << 20;
+
+/** A line's timestamp: read from its head when it leads (every rollout line does), else parsed. */
+function lineTs(line: Buffer): number | null {
+  const lead = LEADING_TS.exec(line.subarray(0, 96).toString("latin1"));
+  if (lead) return parseTs(lead[1]);
+  if (line.length > REPLAY_SCAN_LINE_MAX) return null;
+  try {
+    return parseTs((JSON.parse(line.toString("utf8")) as Record<string, unknown>).timestamp);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The byte offset where the fork-time burst that follows the header ends: the start of the
+ * first line after a gap of more than REPLAY_BURST_GAP_MS between two stamped lines,
+ * counted from line 1 (the header may be stamped well before the replay). A file that ends
+ * inside the burst gives the end of its last complete line (a later read scans again, and
+ * finds the same offset or a later one). Null when no line after the header has a timestamp.
+ */
+function burstEnd(path: string): number | null {
+  let fd: number;
+  try {
+    fd = openSync(path, "r");
+  } catch {
+    return null;
+  }
+  try {
+    let offset = 0;
+    let prev: number | null = null;
+    for (;;) {
+      const batch = readLines(fd, offset, 1 << 20);
+      for (let i = 0; i < batch.lines.length; i++) {
+        if (batch.starts[i] === 0) continue; // the header
+        const ts = lineTs(batch.lines[i]);
+        if (ts === null) continue;
+        if (prev !== null && ts - prev > REPLAY_BURST_GAP_MS) return batch.starts[i];
+        prev = ts;
+      }
+      if (batch.eof || batch.end === offset) return prev === null ? null : batch.end;
+      offset = batch.end;
+    }
+  } catch {
+    return null;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
+ * The rollout's header (line 0) and how the file replays history, read from the header and
+ * line 1. A header that cannot be read (over the cap) replays nothing.
+ */
+function readReplay(path: string): { header: Record<string, unknown> | null; replay: Replay } {
+  const [first, second] = readHeadLines(path, 2);
+  const header = parseMeta(first);
+  if (!header) return { header, replay: { kind: "none" } };
+  const start = header.subagent_history_start_ordinal;
+  if (typeof start === "number" && Number.isInteger(start) && start > 0) return { header, replay: { kind: "ordinal", start } };
+  // A paginated file states its boundary (an ordinal, or history_base) or has none to skip.
+  if (header.history_base !== undefined && header.history_base !== null) return { header, replay: { kind: "none" } };
+  if (header.history_mode === "paginated") return { header, replay: { kind: "none" } };
+  const next = parseMeta(second);
+  const replayed = typeof header.forked_from_id === "string" || (!!next && next.id !== header.id);
+  if (!replayed) return { header, replay: { kind: "none" } };
+  const end = burstEnd(path);
+  // No timestamp after the header: nothing can be told apart, so nothing is skipped.
+  return { header, replay: end === null ? { kind: "none" } : { kind: "burst", end } };
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -164,14 +298,40 @@ class RolloutTranslator implements LineTranslator {
   private readonly run = `${Date.now().toString(36)}.${++runCounter}`;
   private turn = 0;
   private last: "none" | "user" | "assistant" | "result" = "none";
+  /** The id of this file's own header; a session_meta with another id is a replayed thread's. */
+  private ownId: string | null = null;
+  private replay: Replay;
+  /** True for a forked rollout: its session cwd is its header's, and a spawn task is its first prompt. */
+  private fork = false;
+  /** Lines translated so far in this read (a fresh read's first is the header). */
+  private seen = 0;
+  /** A user message or a spawn task has been read in this read. */
+  private prompted = false;
+  /** The header's agent_path: a spawn task is addressed to it. */
+  private agentPath: string | null = null;
 
-  constructor(file: TranscriptFile, resumed: boolean) {
-    // A fresh read sees session_meta through translate(). A resumed one has not, and
-    // turn_context comes only at the start of a turn: one bounded read of the first line seeds it.
+  constructor(file: TranscriptFile, private readonly resumed: boolean) {
+    // One bounded read of the head tells whether the file replays another thread's history.
+    // A fresh read then sees session_meta through translate(). A resumed one has not, and
+    // turn_context comes only at the start of a turn: the header seeds it.
+    const { header, replay } = readReplay(file.path);
+    this.replay = replay;
+    this.fork = replay.kind !== "none" || typeof header?.forked_from_id === "string";
+    if (typeof header?.id === "string") this.ownId = header.id;
+    if (typeof header?.agent_path === "string") this.agentPath = header.agent_path;
     if (!resumed) return;
-    const meta = readFirstMeta(file.path);
-    this.guardian = isGuardianMeta(meta);
-    if (meta) this.applyMeta(meta);
+    this.guardian = isGuardianMeta(header);
+    if (header) this.applyMeta(header);
+  }
+
+  /** True for a line of the replayed history at the start of a forked rollout (`at`: its byte offset). */
+  private replayed(obj: Record<string, unknown>, at: number | undefined): boolean {
+    const r = this.replay;
+    // A line without an ordinal in such a file is kept (none was seen in 501 files).
+    if (r.kind === "ordinal") return typeof obj.ordinal === "number" && obj.ordinal < r.start;
+    // The burst is a byte range of the file, so every way of reading it cuts at the same line.
+    if (r.kind === "burst") return at !== undefined && at < r.end;
+    return false;
   }
 
   private applyMeta(payload: Record<string, unknown>): void {
@@ -190,6 +350,8 @@ class RolloutTranslator implements LineTranslator {
     return {
       timestamp: obj.timestamp,
       ...(cwd ? { cwd } : {}),
+      // A fork's first own line is often a call at an exec workdir: the session's cwd is its header's.
+      ...(this.fork && this.headerCwd ? { sessionCwd: this.headerCwd } : {}),
       ...(atHeader && this.branch ? { gitBranch: this.branch } : {}),
     };
   }
@@ -201,16 +363,24 @@ class RolloutTranslator implements LineTranslator {
     return { type: "assistant", ...this.base(obj, cwd ?? this.cwd), message: { id: `${this.run}-${this.turn}`, content: [block] } };
   }
 
-  translate(obj: Record<string, unknown>): ClaudeLine[] {
+  translate(obj: Record<string, unknown>, at?: number): ClaudeLine[] {
+    const first = this.seen++ === 0 && !this.resumed;
     if (this.guardian) return [];
     const payload = asRecord(obj.payload);
     if (!payload) return [];
+    if (obj.type === "session_meta") {
+      // Only the file's own header describes this session: the first line of the file, or a
+      // session_meta with its id. Another thread's (replayed, with or without an id) never does.
+      // A non-fork whose first line is no session_meta takes the first one with an id, as before.
+      const id = typeof payload.id === "string" ? payload.id : null;
+      if (first || !this.fork) this.ownId ??= id;
+      if (!first && (id === null || id !== this.ownId)) return [];
+      if (isGuardianMeta(payload)) this.guardian = true;
+      this.applyMeta(payload);
+      return [];
+    }
+    if (this.replayed(obj, at)) return [];
     switch (obj.type) {
-      case "session_meta": {
-        if (isGuardianMeta(payload)) this.guardian = true;
-        this.applyMeta(payload);
-        return [];
-      }
       case "turn_context":
         if (typeof payload.cwd === "string" && payload.cwd) this.cwd = payload.cwd;
         return [];
@@ -238,9 +408,34 @@ class RolloutTranslator implements LineTranslator {
           message: { content: [{ type: "tool_result", tool_use_id: p.call_id, content: text, is_error: outputIsError(text) }] },
         }];
       }
+      case "agent_message":
+        return this.spawnTask(p);
       default:
         return [];
     }
+  }
+
+  /**
+   * A forked subagent gets its task as an `agent_message` (459 of the 573 local forks other than the history_base one), so it has
+   * no user message to take a first prompt from: the first agent_message of a fork, before
+   * any user message in this read, is its first prompt. It makes no row (inter-agent
+   * traffic is not indexed); the indexer keeps a first prompt already stored.
+   */
+  private spawnTask(p: Record<string, unknown>): ClaudeLine[] {
+    if (!this.fork || this.prompted) return [];
+    // Addressed to this agent (in all 459 the recipient is the header's agent_path).
+    if (this.agentPath && typeof p.recipient === "string" && p.recipient !== this.agentPath) return [];
+    const text = (Array.isArray(p.content) ? p.content : [])
+      .map((b) => asRecord(b))
+      .filter((b): b is Record<string, unknown> => !!b && b.type === "input_text" && typeof b.text === "string")
+      .map((b) => b.text as string)
+      .filter((t) => t.trim() && !INJECTED_USER_PREFIXES.some((prefix) => t.trimStart().startsWith(prefix)))
+      .join("\n\n");
+    // Only a message with text counts, so a resumed read (which forgets `prompted`) agrees
+    // with a full read when the first agent_message is empty or injected text only.
+    if (!text) return [];
+    this.prompted = true;
+    return [{ type: "first-prompt", text }];
   }
 
   private message(obj: Record<string, unknown>, p: Record<string, unknown>): ClaudeLine[] {
@@ -255,6 +450,7 @@ class RolloutTranslator implements LineTranslator {
     const block = { type: "text", text: texts.join("\n\n") };
     if (p.role === "assistant") return [this.assistant(obj, block)];
     this.last = "user";
+    this.prompted = true;
     return [{ type: "user", ...this.base(obj), message: { content: [block] } }];
   }
 

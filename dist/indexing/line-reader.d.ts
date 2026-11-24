@@ -4,6 +4,8 @@
  */
 export interface LineBatch {
     lines: Buffer[];
+    /** Byte offset in the file at which each of `lines` starts. */
+    starts: number[];
     /** Offset just past the last complete line returned (== start when none). */
     end: number;
     /** True when the read reached the end of the file (an unfinished last line stays unread). */
