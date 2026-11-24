@@ -304,7 +304,11 @@ export async function runCommand(command: string, argv: string[]): Promise<numbe
         return runSearch(args);
       case "record-repo":
         // Runs at every session start: silent, never fails, and never opens the database.
-        recordRepos([args.positional[0] ?? process.cwd()]);
+        try {
+          recordRepos([args.positional[0] ?? process.cwd()]);
+        } catch {
+          // process.cwd() throws when the directory was deleted: nothing to record
+        }
         return 0;
       default:
         console.log(HELP);

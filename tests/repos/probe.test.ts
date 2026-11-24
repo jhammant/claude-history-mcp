@@ -134,4 +134,27 @@ describe.skipIf(!hasGit)("git probe", () => {
     expect(out).toEqual([]);
     expect(existsSync(join(tmp, "data"))).toBe(false);
   });
+
+  it("record-repo stays silent and exits 0 when the current directory is gone", async () => {
+    const gone = join(tmp, "gone");
+    mkdirSync(gone);
+    const original = process.cwd();
+    const out: unknown[] = [];
+    const origLog = console.log;
+    const origErr = console.error;
+    let code: number | undefined;
+    try {
+      process.chdir(gone);
+      rmSync(gone, { recursive: true });
+      console.log = (...a: unknown[]) => void out.push(a);
+      console.error = (...a: unknown[]) => void out.push(a);
+      code = await runCommand("record-repo", []);
+    } finally {
+      console.log = origLog;
+      console.error = origErr;
+      process.chdir(original);
+    }
+    expect(out).toEqual([]);
+    expect(code).toBe(0);
+  });
 });
