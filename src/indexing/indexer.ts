@@ -23,12 +23,14 @@ import { CONFIG } from "../config.js";
 import type { DB } from "../db/database.js";
 import { scopeOf } from "../db/schema.js";
 import { extractContent, isLocalCommandEcho, truncate, type ToolResult } from "../parsers/content-extractor.js";
+import { formatOf } from "../formats/registry.js";
 import type { TranscriptFile } from "../parsers/transcript-files.js";
+import { claudeProjectDir, UNKNOWN_PROJECT } from "../utils/path-encoder.js";
 import { readLines } from "./line-reader.js";
 
 const HEAD_BYTES = 4096;
 const DEFAULT_BATCH_BYTES = 4 << 20;
-/** Lines this long are parsed only when they look like a message (skips API dumps). */
+/** Lines this long are parsed only when their format says they look like a message (skips API dumps). */
 const BIG_LINE = 256 << 10;
 
 export type Role = "user" | "assistant" | "tool";
@@ -74,7 +76,7 @@ interface PendingTools {
 }
 const MAX_PENDING_TOOLS = 100;
 
-function parsePendingTools(raw: string | null | undefined): PendingTools {
+export function parsePendingTools(raw: string | null | undefined): PendingTools {
   try {
     const value = raw ? (JSON.parse(raw) as Partial<PendingTools>) : {};
     return {
@@ -166,7 +168,7 @@ function subagentTitle(file: TranscriptFile): string | null {
  * Builds message rows from transcript lines. Holds the last row open so that the next
  * line (another block of the same assistant turn, or a tool result) can extend it.
  */
-class RowBuilder {
+export class RowBuilder {
   readonly finished: PendingRow[] = [];
   update: SessionUpdate = emptyUpdate();
 
@@ -268,20 +270,18 @@ class RowBuilder {
   }
 }
 
-function isMessageLine(line: Buffer): boolean {
-  if (line.length < BIG_LINE) return true;
-  const head = line.subarray(0, 2048).toString("utf8");
-  return head.includes('"type":"user"') || head.includes('"type":"assistant"');
-}
-
 function prepare(db: DB) {
   return {
     file: db.prepare("SELECT * FROM files WHERE path = ?"),
-    session: db.prepare("SELECT sid, legacy, first_prompt FROM sessions WHERE id = ?"),
+    otherFile: db.prepare(
+      `SELECT 1 FROM files f JOIN sessions s ON s.sid = f.session_sid WHERE s.id = ? AND f.path <> ?`
+    ),
+    session: db.prepare("SELECT sid, legacy, first_prompt, cwd, project FROM sessions WHERE id = ?"),
     insertSession: db.prepare(
       `INSERT INTO sessions(id, project, source, is_subagent, parent_session, title)
        VALUES (@id, @project, @source, @isSubagent, @parent, @title) ON CONFLICT(id) DO NOTHING`
     ),
+    setProject: db.prepare("UPDATE sessions SET project = ? WHERE sid = ? AND project = ?"),
     maxSeq: db.prepare("SELECT max(seq) AS seq FROM messages WHERE session_sid = ?"),
     tailRow: db.prepare(
       `SELECT m.id, m.seq, m.role, m.ts, m.tools, t.prose, t.tool_input, t.tool_output
@@ -342,8 +342,10 @@ export function hasChanged(file: TranscriptFile, row: { size: number; mtime: num
   return !row || row.size !== file.size || row.mtime !== file.mtimeMs || row.ino !== file.ino;
 }
 
-function ensureSession(db: DB, s: Statements, file: TranscriptFile): { sid: number; legacy: number; first_prompt: string | null } {
-  const existing = s.session.get(file.sessionId) as { sid: number; legacy: number; first_prompt: string | null } | undefined;
+type SessionInfo = { sid: number; legacy: number; first_prompt: string | null; cwd: string | null; project: string };
+
+function ensureSession(db: DB, s: Statements, file: TranscriptFile): SessionInfo {
+  const existing = s.session.get(file.sessionId) as SessionInfo | undefined;
   if (existing) return existing;
   db.transaction(() => {
     s.insertSession.run({
@@ -355,8 +357,11 @@ function ensureSession(db: DB, s: Statements, file: TranscriptFile): { sid: numb
       title: file.isSubagent ? subagentTitle(file) : null,
     });
   }).immediate();
-  return s.session.get(file.sessionId) as { sid: number; legacy: number; first_prompt: string | null };
+  return s.session.get(file.sessionId) as SessionInfo;
 }
+
+/** Paths already reported as skipped, so a sweep logs each once per process. */
+const loggedClaimed = new Set<string>();
 
 export function indexFile(db: DB, file: TranscriptFile, options: IndexFileOptions = {}): IndexFileResult {
   const s = statements(db);
@@ -370,6 +375,14 @@ export function indexFile(db: DB, file: TranscriptFile, options: IndexFileOption
     return { ...result, status: "missing" };
   }
   try {
+    const format = formatOf(file.format);
+    if (format.firstFileWins && !s.file.get(file.path) && s.otherFile.get(file.sessionId, file.path)) {
+      if (!loggedClaimed.has(file.path)) {
+        loggedClaimed.add(file.path);
+        console.error(`claude-history: skipping ${file.path}: session ${file.sessionId} is already indexed from another file`);
+      }
+      return result;
+    }
     const session = ensureSession(db, s, file);
     result.sessionSid = session.sid;
     let row = s.file.get(file.path) as FileRow | undefined;
@@ -420,7 +433,12 @@ export function indexFile(db: DB, file: TranscriptFile, options: IndexFileOption
     const builder = new RowBuilder(
       pending, maxSeq === null ? 0 : maxSeq + 1, !!session.first_prompt, parsePendingTools(row?.pending_tools),
     );
+    const tr = format.translator(file, offset > 0);
     let head = row?.head ?? "";
+    // A session cwd, as far as it is known; a project the path does not carry starts as
+    // UNKNOWN_PROJECT and is read from the cwd.
+    let sessionCwd = session.cwd;
+    let project = format.projectFromContent ? session.project : file.projectDir;
 
     for (;;) {
       const batch = readLines(fd, offset, batchBytes);
@@ -428,27 +446,32 @@ export function indexFile(db: DB, file: TranscriptFile, options: IndexFileOption
       if (end === offset) break;
 
       for (const line of batch.lines) {
-        if (!isMessageLine(line)) continue;
+        if (line.length >= BIG_LINE && !format.isMessageLine(line.subarray(0, 2048).toString("utf8"))) continue;
         let obj: Record<string, unknown>;
         try {
           obj = JSON.parse(line.toString("utf8"));
         } catch {
           continue; // a malformed line is skipped, never retried
         }
-        builder.addLine(obj);
+        for (const l of tr.translate(obj)) builder.addLine(l);
       }
       const rows = builder.drain();
       const update = builder.update;
       builder.update = emptyUpdate();
+      sessionCwd ??= update.cwd;
       if (head.length === 0 || Number(head.slice(0, head.indexOf(":"))) < Math.min(HEAD_BYTES, end)) {
         head = headHash(fd, Math.min(HEAD_BYTES, end));
       }
 
       options.beforeCommit?.();
       const start = offset;
+      // A cwd that encodes to nothing (the filesystem root) resolves nothing.
+      const fromCwd = format.projectFromContent && project === UNKNOWN_PROJECT && sessionCwd ? claudeProjectDir(sessionCwd) : "";
+      const resolved = fromCwd || project;
       const committed = db.transaction(() => {
         const current = s.file.get(file.path) as FileRow | undefined;
         if ((current?.offset ?? 0) !== start || (current && current.ino !== file.ino)) return false;
+        if (resolved !== project) s.setProject.run(resolved, session.sid, UNKNOWN_PROJECT);
         let added = 0;
         for (const r of rows) {
           const text = { prose: r.prose, toolInput: r.toolInput, toolOutput: r.toolOutput };
@@ -476,6 +499,7 @@ export function indexFile(db: DB, file: TranscriptFile, options: IndexFileOption
       }).immediate();
 
       if (!committed) return { ...result, status: "raced" };
+      project = resolved;
       result.status = "indexed";
       result.bytesRead += end - offset;
       offset = end;

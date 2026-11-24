@@ -57,7 +57,7 @@ for a JSON array. It reads two small indexed tables and takes a few tens of mill
 ```text
 ~/.claude/projects/**.jsonl   ──┐   sweep (nightly)        ┌───────────────────────────┐
   sessions + subagent runs      ├──────────────────────────▶ ~/.claude-history-mcp/     │
-~/.codex/transcript-feed/     ──┘   top-up (at query time,  │   history.db  (SQLite)    │
+~/.codex/sessions, ~/.pi/…   ──┘   top-up (at query time,  │   history.db  (SQLite)    │
   projects/**.jsonl                 ≤300 ms, newest first)  │   messages + FTS5 index   │
                                                             │   sessions, summaries,    │
                                                             │   knowledge               │
@@ -67,8 +67,11 @@ for a JSON array. It reads two small indexed tables and takes a few tens of mill
 ```
 
 **Transcripts.** Claude Code saves every conversation as JSONL under `~/.claude/projects/`
-(subagent runs under `<session>/subagents/`); the optional Codex feed lives under
-`~/.codex/transcript-feed/projects/`.
+(subagent runs under `<session>/subagents/`). Native Codex rollout files are read
+directly from `~/.codex/sessions/` and pi session files from `~/.pi/agent/sessions/`;
+the older Codex feed (`~/.codex/transcript-feed/projects/`) is still read if present.
+Codex and pi sessions get their project from the working directory they recorded, and
+sit in the same database as `source = codex` and `source = pi`.
 
 **One database.** `history.db` holds one row per message: the prose, the tool names, and
 the tool activity (commands, file paths, search patterns, and tool results capped at about
@@ -139,6 +142,8 @@ The old files are left in place; delete them yourself once you are happy.
 | `CLAUDE_HISTORY_CLAUDE_DIR` | `~/.claude` | Claude Code's config dir (settings, commands) |
 | `CLAUDE_HISTORY_PROJECTS_DIR` | `<claude dir>/projects` | Claude Code transcripts |
 | `CODEX_TRANSCRIPT_FEED` | `<CODEX_HOME>/transcript-feed` | Codex feed root (reads its `projects/`) |
+| `CLAUDE_HISTORY_CODEX_SESSIONS_DIR` | `<CODEX_HOME or ~/.codex>/sessions` | Native Codex rollout files |
+| `CLAUDE_HISTORY_PI_SESSIONS_DIR` | `~/.pi/agent/sessions` | Native pi session files |
 | `CODEX_HOME` | `~/.codex` | Codex home |
 | `CLAUDE_HISTORY_TOPUP_MS` | `300` | Query-time indexing budget in ms; `0` turns it off |
 
@@ -160,7 +165,7 @@ The old files are left in place; delete them yourself once you are happy.
   (marked "partial match"), ranked by how much of the query they contain.
 - `"exact phrase"`, `redis OR memcached`.
 - Identifiers work as typed: `index.msgpack`, `ERR_SQLITE_ERROR`, `src/server.ts`.
-- Filters: `project:` `branch:` `tool:Bash` `role:user|assistant|tool` `source:claude|codex`
+- Filters: `project:` `branch:` `tool:Bash` `role:user|assistant|tool` `source:claude|codex|pi`
   `session:<id>` `after:7d` `before:2026-01-15` (relative `h/d/w/m/y`, ISO dates, `today`).
   `session:` takes a session id or prefix: a parent session's id also covers its subagents,
   and `session:agent-<id>` finds that subagent under every parent.

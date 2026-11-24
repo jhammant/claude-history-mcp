@@ -40,7 +40,7 @@ function contextLine(label: string, m: ContextMessage | undefined): string | nul
 
 export function formatHit(hit: SearchHit, index: number): string[] {
   const tags: string[] = [];
-  if (hit.source === "codex") tags.push("codex");
+  if (hit.source !== "claude") tags.push(hit.source);
   if (hit.isSubagent) tags.push(`subagent of ${hit.parentSession ?? "unknown session"}`);
   if (hit.legacy) tags.push("archived (old index)");
   if (hit.partial) tags.push("partial match");

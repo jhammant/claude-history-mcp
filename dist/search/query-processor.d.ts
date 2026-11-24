@@ -2,12 +2,13 @@
  * Parse what a user or model types into filters and search terms, and turn the terms
  * into FTS5 MATCH expressions that can never be a syntax error.
  *
- *   project:name  branch:name  tool:Bash  role:user|assistant|tool  source:claude|codex
+ *   project:name  branch:name  tool:Bash  role:user|assistant|tool  source:claude|codex|pi
  *   session:<id or prefix>  before:<date>  after:<date>   (dates: 7d, 2w, 3m, 1y, 2026-01-15)
  *   "an exact phrase"   a OR b   index.msgpack (punctuated terms become phrases)
  */
+import { type Source } from "../formats/types.js";
+export type { Source };
 export type Role = "user" | "assistant" | "tool";
-export type Source = "claude" | "codex";
 export interface QueryFilters {
     project?: string;
     before?: number;

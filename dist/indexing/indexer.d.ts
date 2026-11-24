@@ -37,6 +37,54 @@ export interface IndexFileResult {
     complete: boolean;
     sessionSid?: number;
 }
+/** Tool calls still waiting for their results: own-tool ids, and Codex calls in order. */
+interface PendingTools {
+    own: string[];
+    textCalls: boolean[];
+}
+export declare function parsePendingTools(raw: string | null | undefined): PendingTools;
+interface PendingRow {
+    rowid?: number;
+    seq: number;
+    role: Role;
+    ts: number | null;
+    msgId: string | null;
+    prose: string;
+    toolInput: string;
+    toolOutput: string;
+    tools: string[];
+    dirty: boolean;
+}
+interface SessionUpdate {
+    minTs: number | null;
+    maxTs: number | null;
+    added: number;
+    cwd: string | null;
+    branch: string | null;
+    firstPrompt: string | null;
+    aiTitle: string | null;
+    customTitle: string | null;
+}
+/**
+ * Builds message rows from transcript lines. Holds the last row open so that the next
+ * line (another block of the same assistant turn, or a tool result) can extend it.
+ */
+export declare class RowBuilder {
+    pending: PendingRow | null;
+    private nextSeq;
+    private hasFirstPrompt;
+    readonly calls: PendingTools;
+    readonly finished: PendingRow[];
+    update: SessionUpdate;
+    constructor(pending: PendingRow | null, nextSeq: number, hasFirstPrompt: boolean, calls: PendingTools);
+    /** False for the result of a call to this server's own tools. */
+    private keepResult;
+    private start;
+    private noteTime;
+    addLine(obj: Record<string, unknown>): void;
+    /** Rows to write for this batch (finished ones plus the open one), then reset. */
+    drain(): PendingRow[];
+}
 /** True when the file on disk differs from what the files table recorded. */
 export declare function hasChanged(file: TranscriptFile, row: {
     size: number;
@@ -44,4 +92,5 @@ export declare function hasChanged(file: TranscriptFile, row: {
     ino: number;
 } | undefined): boolean;
 export declare function indexFile(db: DB, file: TranscriptFile, options?: IndexFileOptions): IndexFileResult;
+export {};
 //# sourceMappingURL=indexer.d.ts.map
