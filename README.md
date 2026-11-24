@@ -124,8 +124,9 @@ database can hold several machines and `list_projects` can show one project once
   `host:laptop`; `host:unknown` finds sessions indexed before hosts were recorded.
 - **Repository.** The sweep works it out from the first of these that applies:
   1. the git remote the session itself recorded, when the session saw git (a branch or a
-     remote) in its own working directory. Only Codex sessions record a remote (the one in
-     the session header); Claude Code and pi sessions record none;
+     remote) in its own working directory. A branch named `HEAD` is not evidence: Claude
+     Code writes it in folders that are no repository, and a detached checkout reports it. Only Codex sessions record a remote (the
+     one in the session header); Claude Code and pi sessions record none;
   2. the repository map, a file per machine with one line per directory: the directory,
      its main repository root and its `origin` URL. The row for the session's directory
      applies, or else the row for the nearest parent directory that has one; it gives both

@@ -37,8 +37,8 @@ export interface ResolveInput {
   cwd: string | null;
   gitRemote: string | null;
   /**
-   * sessions.cwd_git: true when git evidence (a branch or remote) was seen on a line at the
-   * session's cwd. A remote without it describes another directory (a Codex header cwd the
+   * sessions.cwd_git: true when git evidence (a real branch, not HEAD, or a remote) was seen on a
+   * line at the session's cwd. A remote without it describes another directory (a Codex header cwd the
    * session left), so a map row for the cwd wins over it.
    */
   cwdGit: boolean;
@@ -117,14 +117,15 @@ export function repoName(key: string): string {
 interface EvidenceSource {
   /** `dir` is a repo_map dir or root of the host. */
   mapped(dir: string): boolean;
-  /** Some session of the host with cwd = `dir` saw a git branch or remote on a line at that cwd (sessions.cwd_git). */
+  /** Some session of the host with cwd = `dir` saw a real git branch (not HEAD) or a remote on a line at that cwd (sessions.cwd_git). */
   gitSession(dir: string): boolean;
 }
 
 /**
  * The one test of strong evidence that a directory is a git work tree: the host's pushed map
  * names it, or a session of the host that ran in it saw a git branch or remote on a line at
- * that directory (sessions.cwd_git; a folder that is not a repository never has one). A
+ * that directory (sessions.cwd_git). A branch named HEAD is not evidence: it is what a folder
+ * that is no repository reports, and a detached checkout too. A
  * session that merely ran there is not evidence, nor its git_branch alone: a session that
  * started in a folder of repositories and moved into one records the folder as its cwd and
  * that repository's branch.

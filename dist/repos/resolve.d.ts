@@ -26,8 +26,8 @@ export interface ResolveInput {
     cwd: string | null;
     gitRemote: string | null;
     /**
-     * sessions.cwd_git: true when git evidence (a branch or remote) was seen on a line at the
-     * session's cwd. A remote without it describes another directory (a Codex header cwd the
+     * sessions.cwd_git: true when git evidence (a real branch, not HEAD, or a remote) was seen on a
+     * line at the session's cwd. A remote without it describes another directory (a Codex header cwd the
      * session left), so a map row for the cwd wins over it.
      */
     cwdGit: boolean;

@@ -10,7 +10,7 @@ export const SCHEMA_V4_COLUMNS = [
     ["sessions", "git_remote", "TEXT"], // origin URL the session itself recorded, credentials stripped
     ["sessions", "repo", "TEXT"], // resolved repository key: host/owner/name, or [<host>:]<path>
     ["sessions", "repo_root", "TEXT"], // main repository root
-    ["sessions", "cwd_git", "INTEGER NOT NULL DEFAULT 0"], // 1: a line at the session's own cwd carried a git branch or remote
+    ["sessions", "cwd_git", "INTEGER NOT NULL DEFAULT 0"], // 1: a line at the session's own cwd carried a real git branch (not HEAD) or a remote
 ];
 export const SCHEMA_V4 = `
 CREATE INDEX IF NOT EXISTS sessions_repo ON sessions(repo, end_time);

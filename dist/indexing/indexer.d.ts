@@ -83,7 +83,7 @@ interface SessionUpdate {
     firstPrompt: string | null;
     aiTitle: string | null;
     customTitle: string | null;
-    /** 1 when a line at the session's own cwd carried a git branch or remote (only ever raises cwd_git). */
+    /** 1 when a line at the session's own cwd carried git evidence: a real branch (not HEAD) or a remote (only ever raises cwd_git). */
     cwdGit: number;
     /**
      * The cwd, branch and remote of lines skipped because another session holds them (a fork's

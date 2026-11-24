@@ -145,7 +145,7 @@ interface SessionUpdate {
   firstPrompt: string | null;
   aiTitle: string | null;
   customTitle: string | null;
-  /** 1 when a line at the session's own cwd carried a git branch or remote (only ever raises cwd_git). */
+  /** 1 when a line at the session's own cwd carried git evidence: a real branch (not HEAD) or a remote (only ever raises cwd_git). */
   cwdGit: number;
   /**
    * The cwd, branch and remote of lines skipped because another session holds them (a fork's
@@ -162,6 +162,16 @@ function emptyUpdate(): SessionUpdate {
     gitRemote: null, minTs: null, maxTs: null, added: 0, cwd: null, branch: null, firstPrompt: null, aiTitle: null, customTitle: null,
     cwdGit: 0, copiedCwd: null, copiedBranch: null, copiedGitRemote: null, copiedCwdGit: 0,
   };
+}
+
+/**
+ * Whether a line shows that its cwd is inside a git work tree: a real branch name or a remote.
+ * A branch named `HEAD` is not evidence: Claude Code writes it in directories that are not
+ * repositories, and a detached checkout reports it too. (The stored git_branch is unchanged.)
+ */
+function carriesGitEvidence(obj: Record<string, unknown>): boolean {
+  const branch = typeof obj.gitBranch === "string" ? obj.gitBranch : "";
+  return (branch !== "" && branch !== "HEAD") || (typeof obj.gitRemote === "string" && obj.gitRemote !== "");
 }
 
 /** sessions.context_copied bits: the stored value came from copied lines, not the session's own. */
@@ -277,7 +287,7 @@ export class RowBuilder {
     const lineCwd = typeof obj.cwd === "string" && obj.cwd ? obj.cwd : null;
     if (lineCwd && !this.sessionCwd) this.sessionCwd = lineCwd;
     if (lineCwd && lineCwd === this.sessionCwd &&
-        ((typeof obj.gitBranch === "string" && obj.gitBranch) || (typeof obj.gitRemote === "string" && obj.gitRemote))) {
+        carriesGitEvidence(obj)) {
       this.update.cwdGit = 1;
     }
   }
@@ -293,7 +303,7 @@ export class RowBuilder {
     if (typeof obj.gitBranch === "string" && obj.gitBranch && !u.copiedBranch) u.copiedBranch = obj.gitBranch;
     if (typeof obj.gitRemote === "string" && obj.gitRemote && !u.copiedGitRemote) u.copiedGitRemote = obj.gitRemote;
     if (lineCwd && lineCwd === u.copiedCwd &&
-        ((typeof obj.gitBranch === "string" && obj.gitBranch) || (typeof obj.gitRemote === "string" && obj.gitRemote))) {
+        carriesGitEvidence(obj)) {
       u.copiedCwdGit = 1;
     }
   }

@@ -69,7 +69,8 @@ export function repoName(key) {
 /**
  * The one test of strong evidence that a directory is a git work tree: the host's pushed map
  * names it, or a session of the host that ran in it saw a git branch or remote on a line at
- * that directory (sessions.cwd_git; a folder that is not a repository never has one). A
+ * that directory (sessions.cwd_git). A branch named HEAD is not evidence: it is what a folder
+ * that is no repository reports, and a detached checkout too. A
  * session that merely ran there is not evidence, nor its git_branch alone: a session that
  * started in a folder of repositories and moved into one records the folder as its cwd and
  * that repository's branch.

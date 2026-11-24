@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { sweep } from '../../src/indexing/sweep.js';
+import { reposForProjectFilter } from '../../src/tools/project-match.js';
+import { useHost } from '../helpers/host.js';
 import { createCorpus, rolloutCall, rolloutMessage, rolloutMeta, rolloutTurn, userLine, type Corpus } from '../helpers/corpus.js';
 
 const U1 = '0199dddd-0000-7000-8000-000000000001';
@@ -88,4 +90,69 @@ describe('git evidence at the session cwd', () => {
     sweep(corpus.open());
     expect(codexRow(U4)).toMatchObject({ git_remote: 'https://example.com/acme/app.git' });
   });
+
+  it('does not count a branch named HEAD (no repository, or a detached checkout) but keeps it as the branch', () => {
+    corpus.write(corpus.sessionPath('-work-folder', 'plain'), [userLine('hi', { cwd: '/work/folder', sessionId: 'plain', gitBranch: 'HEAD' })]);
+    sweep(corpus.open());
+    expect(row('plain')).toMatchObject({ cwd: '/work/folder', git_branch: 'HEAD', cwd_git: 0 });
+  });
+
+  it('counts a real branch, even after lines that said HEAD', () => {
+    const path = corpus.write(corpus.sessionPath('-work-repo', 'late'), [userLine('hi', { cwd: '/work/repo', sessionId: 'late', gitBranch: 'HEAD' })]);
+    const db = corpus.open();
+    sweep(db);
+    expect(row('late').cwd_git).toBe(0);
+    corpus.append(path, [userLine('on a branch now', { cwd: '/work/repo', sessionId: 'late', gitBranch: 'main' })]);
+    sweep(db);
+    expect(row('late').cwd_git).toBe(1);
+  });
+
+  it('still counts a remote seen at the cwd when the branch is HEAD', () => {
+    corpus.write(corpus.rolloutPath('2026-10-01', U1), [
+      rolloutMeta(U1, { cwd: '/work/app', branch: 'HEAD', repositoryUrl: 'https://git.example.org/team/app.git' }),
+      rolloutMessage('user', 'hello there'),
+    ]);
+    sweep(corpus.open());
+    expect(row(`codex-${U1}`)).toMatchObject({ cwd: '/work/app', cwd_git: 1 });
+  });
+
+  describe('a plain folder whose sessions all say HEAD', () => {
+    useHost();
+    const NO_GIT = { probeRepos: false };
+    const X = 'git.example.org/team/app';
+
+    it('is not a containing repository: a filter on the folder still reaches a repository beneath it whose root is elsewhere', () => {
+      corpus.write(corpus.sessionPath('-w-folder', 'folder'), [userLine('hi', { cwd: '/w/folder', sessionId: 'folder', gitBranch: 'HEAD' })]);
+      corpus.write(corpus.rolloutPath('2026-10-01', U1), [
+        rolloutMeta(U1, { cwd: '/w/folder/app-link', repositoryUrl: 'https://git.example.org/team/app.git' }),
+        rolloutMessage('user', 'hello there'),
+      ]);
+      corpus.write(corpus.rolloutPath('2026-10-01', U2), [
+        rolloutMeta(U2, { cwd: '/data/app', repositoryUrl: 'https://git.example.org/team/app.git' }),
+        rolloutMessage('user', 'hello there'),
+      ]);
+      const db = corpus.open();
+      sweep(db, NO_GIT);
+      db.prepare('UPDATE sessions SET repo_root = ? WHERE repo = ?').run('/data/app', X); // the link resolves to the real root
+      expect(db.prepare("SELECT cwd_git FROM sessions WHERE id = 'folder'").pluck().get()).toBe(0);
+      expect(reposForProjectFilter(db, '/w/folder')).toContain(X);
+    });
+
+    it('does not fold <folder>/worktrees/<name> into itself', () => {
+      corpus.write(corpus.sessionPath('-w-folder', 'folder'), [userLine('hi', { cwd: '/w/folder', sessionId: 'folder', gitBranch: 'HEAD' })]);
+      corpus.write(corpus.sessionPath('-w-folder-worktrees-x', 'wt'), [userLine('hi', { cwd: '/w/folder/worktrees/x', sessionId: 'wt' })]);
+      const db = corpus.open();
+      sweep(db, NO_GIT);
+      expect(db.prepare("SELECT repo_root FROM sessions WHERE id = 'wt'").pluck().get()).toBe('/w/folder/worktrees/x');
+    });
+
+    it('does fold it when the folder is a real repository (a real branch)', () => {
+      corpus.write(corpus.sessionPath('-w-folder', 'folder'), [userLine('hi', { cwd: '/w/folder', sessionId: 'folder', gitBranch: 'main' })]);
+      corpus.write(corpus.sessionPath('-w-folder-worktrees-x', 'wt'), [userLine('hi', { cwd: '/w/folder/worktrees/x', sessionId: 'wt' })]);
+      const db = corpus.open();
+      sweep(db, NO_GIT);
+      expect(db.prepare("SELECT repo_root FROM sessions WHERE id = 'wt'").pluck().get()).toBe('/w/folder');
+    });
+  });
 });
+
