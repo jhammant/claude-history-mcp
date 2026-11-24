@@ -737,7 +737,7 @@ export function indexFile(db: DB, file: TranscriptFile, options: IndexFileOption
           }
           // A first remote with git evidence at the cwd is an implicit map row there: when it
           // changes the key that directory's sessions take (sessions resolved before it took
-          // the path), it flags the full pass too.
+          // the path, or their own remote seen at another directory), it flags the full pass too.
           else if (newAtCwd((i) => hasGit(i) && !!i?.git_remote) &&
               s.implicitKey(ident.host, ident.cwd as string, session.sid) !== s.implicitKey(ident.host, ident.cwd as string)) {
             s.flagNewDir.run(REPO_NEW_DIR_KEY);

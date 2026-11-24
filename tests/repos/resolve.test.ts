@@ -114,6 +114,30 @@ describe('repoResolver', () => {
     expect(resolve({ ...fromA, host: 'desktop', cwd: '/w/b' })).toEqual({ key: 'h.example/o/a', name: 'a', root: '/w/b' });
   });
 
+  it('a session remote seen elsewhere (cwd_git = 0) yields to the remote another session saw at exactly its cwd', () => {
+    const atCwd = (id: string, host: string, cwd: string, remote: string) =>
+      db.prepare(`INSERT INTO sessions(id, project, host, cwd, git_remote, cwd_git, source)
+        VALUES (?, 'p', ?, ?, ?, 1, 'codex')`).run(id, host, cwd, remote);
+    const fromA = { host: 'laptop', cwd: '/w/d', gitRemote: 'https://h.example/o/a.git', cwdGit: false };
+    // no implicit row: the session's own remote
+    expect(resolve(fromA)).toEqual({ key: 'h.example/o/a', name: 'a', root: '/w/d' });
+    // another host's session at the same path does not count
+    atCwd('desk', 'desktop', '/w/d', 'https://h.example/o/desk.git');
+    expect(resolve(fromA)).toEqual({ key: 'h.example/o/a', name: 'a', root: '/w/d' });
+    // nor does one below the cwd
+    atCwd('below', 'laptop', '/w/d/sub', 'https://h.example/o/sub.git');
+    expect(resolve(fromA)).toEqual({ key: 'h.example/o/a', name: 'a', root: '/w/d' });
+    // a same-host session that saw git at exactly the cwd: its remote wins
+    atCwd('here', 'laptop', '/w/d', 'https://h.example/o/d.git');
+    expect(resolve(fromA)).toEqual({ key: 'h.example/o/d', name: 'd', root: '/w/d' });
+    expect(resolve({ ...fromA, cwd: '/w/d/' })).toEqual({ key: 'h.example/o/d', name: 'd', root: '/w/d' });
+    // the session's own remote seen at its cwd still comes first
+    expect(resolve({ ...fromA, cwdGit: true })).toEqual({ key: 'h.example/o/a', name: 'a', root: '/w/d' });
+    // and a map row for the cwd still outranks the implicit row
+    map('laptop', '/w/d', '/w/d', 'https://h.example/o/mapped.git');
+    expect(resolve(fromA)).toEqual({ key: 'h.example/o/mapped', name: 'mapped', root: '/w/d' });
+  });
+
   it('step 2: the map row for the cwd, or its longest ancestor, path-segment aware', () => {
     map('laptop', '/home/me/src/worktree-x', '/home/me/src/app', null);
     map('laptop', '/w/b', '/w/b-root', 'https://h.example/o/b.git');
@@ -289,6 +313,9 @@ describe('resolveAllSessions', () => {
     session('elsewhere-mapped-null', '/w/p2', 'https://h.example/o/a.git', 0);
     session('elsewhere-unmapped', '/w/p6', 'https://h.example/o/a.git', 0);
     session('here-mapped', '/w/p3', 'https://h.example/o/own.git', 1);
+    // a remote seen elsewhere, at a cwd with an implicit row (implicit, at /w/p5): the implicit row wins
+    session('elsewhere-implicit', '/w/p5', 'https://h.example/o/a.git', 0);
+    session('elsewhere-implicit-desk', '/w/p5', 'https://h.example/o/a.git', 0, 'desktop');
     db.prepare("INSERT INTO repo_map(host, dir, root, remote, at) VALUES ('laptop', '/w/p2', '/w/main', NULL, 1)").run();
     db.prepare("INSERT INTO repo_map(host, dir, root, remote, at) VALUES ('laptop', '/w/p3', '/w/p3', 'https://h.example/o/p3.git', 1)").run();
     resolveAllSessions(db);
@@ -297,6 +324,8 @@ describe('resolveAllSessions', () => {
     expect(repo('elsewhere-mapped-null')).toEqual({ repo: 'laptop:/w/main', repo_root: '/w/main' });
     expect(repo('elsewhere-unmapped')).toEqual({ repo: 'h.example/o/a', repo_root: '/w/p6' });
     expect(repo('here-mapped')).toEqual({ repo: 'h.example/o/own', repo_root: '/w/p3' });
+    expect(repo('elsewhere-implicit')).toEqual({ repo: 'h.example/o/p5', repo_root: '/w/p5' });
+    expect(repo('elsewhere-implicit-desk')).toEqual({ repo: 'h.example/o/a', repo_root: '/w/p5' });
     const resolve = repoResolver(db);
     const rows = db.prepare('SELECT host, cwd, git_remote, cwd_git, repo, repo_root FROM sessions').all() as Array<{
       host: string; cwd: string | null; git_remote: string | null; cwd_git: number; repo: string | null; repo_root: string | null;

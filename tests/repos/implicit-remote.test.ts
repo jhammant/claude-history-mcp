@@ -1,10 +1,11 @@
+import { createHash } from 'crypto';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { openDatabase, type DB } from '../../src/db/database.js';
+import { getMeta, openDatabase, setMeta, type DB } from '../../src/db/database.js';
 import { sweep } from '../../src/indexing/sweep.js';
-import { repoResolver, resolveAllSessions } from '../../src/repos/resolve.js';
+import { repoResolvedStamp, repoResolver, resolveAllSessions } from '../../src/repos/resolve.js';
 import { useHost } from '../helpers/host.js';
 import { createCorpus, piSession, piUser, rolloutMessage, rolloutMeta, rolloutTurn, userLine, type Corpus } from '../helpers/corpus.js';
 
@@ -134,6 +135,58 @@ describe('implicit map rows from a session remote at its own cwd', () => {
       leftHeader();
       sweep(corpus.open(), NO_GIT);
       expect(codexRow()).toMatchObject({ cwd: '/w/repoB', cwd_git: 0, repo: KEY, repo_root: '/w/repoB' });
+    });
+
+    const U3 = '0199eeee-0000-7000-8000-000000000003';
+    const codexAtB = () => corpus.write(corpus.rolloutPath('2026-10-02', U3), [
+      rolloutMeta(U3, { cwd: '/w/repoB', repositoryUrl: B_REMOTE }),
+      rolloutMessage('user', 'hello from inside repository B'),
+    ]);
+
+    it('takes the remote another session saw at exactly its cwd, resolved on write', () => {
+      codexAtB();
+      sweep(corpus.open(), NO_GIT);
+      leftHeader();
+      sweep(corpus.open(), NO_GIT);
+      expect(codexRow()).toMatchObject({ cwd: '/w/repoB', cwd_git: 0, repo: 'example.com/acme/b', repo_root: '/w/repoB' });
+    });
+
+    it('is resolved again by the full pass when the first git evidence at its cwd brings a remote', () => {
+      leftHeader();
+      sweep(corpus.open(), NO_GIT);
+      expect(codexRow()).toMatchObject({ repo: KEY });
+      codexAtB();
+      sweep(corpus.open(), NO_GIT);
+      expect(codexRow()).toMatchObject({ cwd_git: 0, repo: 'example.com/acme/b', repo_root: '/w/repoB' });
+    });
+
+    it('is resolved again on upgrade from a database stamped by the previous resolver order', () => {
+      leftHeader();
+      codexAtB();
+      const db = corpus.open();
+      sweep(db, NO_GIT);
+      expect(codexRow()).toMatchObject({ repo: 'example.com/acme/b' });
+      // what revision 1 (own remote seen elsewhere above the implicit row) stored, and its stamp
+      db.prepare('UPDATE sessions SET repo = ? WHERE id = ?').run(KEY, `codex-${U2}`);
+      const revision1 = `4:${createHash('sha1').update('1\n\n.worktrees,worktrees').digest('hex').slice(0, 8)}`;
+      expect(repoResolvedStamp()).not.toBe(revision1);
+      setMeta(db, 'repo_resolved', revision1);
+      sweep(db, NO_GIT);
+      expect(codexRow()).toMatchObject({ repo: 'example.com/acme/b', repo_root: '/w/repoB' });
+      expect(getMeta(db, 'repo_resolved')).toBe(repoResolvedStamp());
+    });
+
+    it('is resolved again by the full pass when a remote joins git evidence already at its cwd', () => {
+      // git evidence at the cwd (a branch) but no remote: no implicit row yet
+      corpus.write(corpus.sessionPath('-w-repoB', 'branch-only'),
+        [userLine('hi', { cwd: '/w/repoB', sessionId: 'branch-only', gitBranch: 'main' })]);
+      leftHeader();
+      sweep(corpus.open(), NO_GIT);
+      expect(corpus.open().prepare("SELECT cwd_git FROM sessions WHERE id = 'branch-only'").pluck().get()).toBe(1);
+      expect(codexRow()).toMatchObject({ repo: KEY });
+      codexAtB();
+      sweep(corpus.open(), NO_GIT);
+      expect(codexRow()).toMatchObject({ cwd_git: 0, repo: 'example.com/acme/b', repo_root: '/w/repoB' });
     });
   });
 
