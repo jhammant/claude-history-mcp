@@ -49,6 +49,10 @@ export function foldWorktreePath(cwd, isRepoDir, containers = CONFIG.worktreeDir
 export function pathKey(host, path) {
     return host === "" ? path : `${host}:${path}`;
 }
+/** True when `key` is the path key of a repository rooted at `root` on `host`, that is, one known by no remote. */
+export function isPathKey(host, key, root) {
+    return key === pathKey(host, root);
+}
 /** The last path segment: a repository key's name, a directory's base name. */
 export function lastSegment(path) {
     const parts = path.split(/[\\/]+/).filter(Boolean);

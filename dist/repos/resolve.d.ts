@@ -49,6 +49,8 @@ export type RepoDirTest = (dir: string) => boolean;
 export declare function foldWorktreePath(cwd: string, isRepoDir?: RepoDirTest, containers?: string[]): string;
 /** The key of a repository known only by its path: `<host>:<path>`, or the plain path when host is unknown (''). */
 export declare function pathKey(host: string, path: string): string;
+/** True when `key` is the path key of a repository rooted at `root` on `host`, that is, one known by no remote. */
+export declare function isPathKey(host: string, key: string, root: string): boolean;
 /** The last path segment: a repository key's name, a directory's base name. */
 export declare function lastSegment(path: string): string;
 /**
