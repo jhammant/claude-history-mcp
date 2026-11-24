@@ -1,12 +1,12 @@
 import { isPathKey, repoName } from "../repos/resolve.js";
-import { encodeProjectPath } from "../utils/path-encoder.js";
+import { claudeProjectDir, encodeProjectPath } from "../utils/path-encoder.js";
 function likeEscape(value) {
     return value.replace(/[\\%_]/g, (c) => "\\" + c);
 }
 /**
  * Resolved repositories (sessions.repo) a caller's text names: the exact key, part of the
  * repository name (the key's last segment), or the end of the key after a "/" (so
- * "owner/name" finds host/owner/name), case-insensitively.
+ * "owner/name" finds host/owner/name; a path key matches by its tail too), case-insensitively.
  */
 export function matchRepos(db, query) {
     const q = query.trim().replace(/\/+$/, "");
@@ -26,19 +26,19 @@ const trimRoot = (p) => p.replace(/\/+$/, "");
  *   2. its own repository root does not match the filter;
  *   3. another repository on the same machine, known by a remote, has a root that matches
  *      the filter, and the working directory is that root or beneath it (segment-aware).
- * A repository known only by its path (a plain folder) never contains another, so a
- * symlinked repository under a parent folder still anchors. The cost: a worktree nested in a
- * repository with no remote still expands.
- * A root matches the filter when it, or its encoded form (-home-me-dev-app, with '/' or any
- * character outside [A-Za-z0-9] as '-'), contains the filter text, case-insensitively. So a worktree of one repository inside another's tree
- * does not drag in the first repository, while a symlinked path, or a folder holding several
- * repositories, still reaches every repository it names.
+ * A repository with no known remote (keyed by its path) never contains another, so a
+ * symlinked repository under a parent folder still anchors. The cost: a worktree nested in
+ * a repository with no known remote still expands.
+ * A root matches the filter when it, or its encoded form (-home-me-dev-app, every character
+ * outside [A-Za-z0-9] as '-'), contains the filter text, case-insensitively. So a worktree
+ * of one repository inside another's tree does not drag in the first repository, while a
+ * symlinked path, or a folder holding several repositories, still reaches every repository
+ * it names.
  */
 function anchoredRepos(db, filter, direct) {
     const f = trimRoot(filter.trim()).toLowerCase();
     const matches = (root) => root.toLowerCase().includes(f) ||
-        encodeProjectPath(root).toLowerCase().includes(f) ||
-        root.replace(/[^A-Za-z0-9]/g, "-").toLowerCase().includes(f);
+        claudeProjectDir(root).toLowerCase().includes(f);
     const triples = db
         .prepare("SELECT DISTINCT host, repo, repo_root FROM sessions WHERE repo IS NOT NULL AND repo_root IS NOT NULL")
         .all();

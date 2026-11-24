@@ -2,7 +2,7 @@ import type { DB } from "../db/database.js";
 /**
  * Resolved repositories (sessions.repo) a caller's text names: the exact key, part of the
  * repository name (the key's last segment), or the end of the key after a "/" (so
- * "owner/name" finds host/owner/name), case-insensitively.
+ * "owner/name" finds host/owner/name; a path key matches by its tail too), case-insensitively.
  */
 export declare function matchRepos(db: DB, query: string): string[];
 /**
