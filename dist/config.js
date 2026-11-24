@@ -9,6 +9,8 @@ import { join } from "path";
  *   CLAUDE_HISTORY_CLAUDE_DIR    Claude Code's config dir (default ~/.claude)
  *   CLAUDE_HISTORY_PROJECTS_DIR  Claude Code transcripts (default <claude dir>/projects)
  *   CODEX_TRANSCRIPT_FEED        Codex feed root (default <CODEX_HOME>/transcript-feed)
+ *   CLAUDE_HISTORY_CODEX_SESSIONS_DIR  native Codex rollouts (default <CODEX_HOME or ~/.codex>/sessions)
+ *   CLAUDE_HISTORY_PI_SESSIONS_DIR  native pi sessions (default ~/.pi/agent/sessions)
  *   CODEX_HOME                   Codex home (default ~/.codex)
  *   CLAUDE_HISTORY_TOPUP_MS      query-time indexing budget in ms (default 300, 0 = off)
  */
@@ -27,6 +29,12 @@ export const CONFIG = {
         const feed = env("CODEX_TRANSCRIPT_FEED") ??
             join(env("CODEX_HOME") ?? join(homedir(), ".codex"), "transcript-feed");
         return join(feed, "projects");
+    },
+    get codexSessionsDir() {
+        return env("CLAUDE_HISTORY_CODEX_SESSIONS_DIR") ?? join(env("CODEX_HOME") ?? join(homedir(), ".codex"), "sessions");
+    },
+    get piSessionsDir() {
+        return env("CLAUDE_HISTORY_PI_SESSIONS_DIR") ?? join(homedir(), ".pi", "agent", "sessions");
     },
     get settingsFile() {
         return join(this.claudeDir, "settings.json");

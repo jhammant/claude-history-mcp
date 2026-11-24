@@ -2,6 +2,8 @@ export declare const CONFIG: {
     readonly claudeDir: string;
     readonly projectsDir: string;
     readonly codexProjectsDir: string;
+    readonly codexSessionsDir: string;
+    readonly piSessionsDir: string;
     readonly settingsFile: string;
     readonly dataDir: string;
     readonly databaseFile: string;

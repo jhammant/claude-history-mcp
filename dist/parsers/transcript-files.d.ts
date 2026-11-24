@@ -1,17 +1,14 @@
 /**
- * Find transcript files on disk.
- *
- *   <claude projects>/<project>/<session>.jsonl                          a session
- *   <claude projects>/<project>/<session>/subagents/**\/agent-<id>.jsonl  its subagents
- *
- * A subagent's session id is agent-<id>@<parent session id>: the same agent file name
- * can appear under two parents (a forked session copies them), and must not merge.
- *   <codex feed>/projects/<project>/codex-<id>.jsonl                      a Codex session
+ * Find transcript files on disk: each registered format (src/formats) walks its own root.
  */
-export type Source = "claude" | "codex";
+import { subagentSessionId } from "../formats/claude.js";
+import type { FormatId, Source } from "../formats/types.js";
+export type { Source } from "../formats/types.js";
+export { subagentSessionId };
 export interface TranscriptFile {
     path: string;
     source: Source;
+    format: FormatId;
     /** Encoded project directory name, e.g. -work-app. */
     projectDir: string;
     sessionId: string;
@@ -28,12 +25,6 @@ export interface ListOptions {
      */
     includeSubagentsOf?: (parentSessionId: string) => boolean;
 }
-export declare function transcriptRoots(): Array<{
-    dir: string;
-    source: Source;
-}>;
-/** Stored id of a subagent: its file name stem, qualified by the parent session. */
-export declare function subagentSessionId(agentStem: string, parentSessionId: string): string;
 export declare function listTranscripts(options?: ListOptions): TranscriptFile[];
 /** Subagent transcripts of one top-level Claude session file. */
 export declare function listSubagentFiles(parent: TranscriptFile): TranscriptFile[];

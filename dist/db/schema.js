@@ -2,14 +2,15 @@
  * Schema and migrations. The schema version lives in PRAGMA user_version; each
  * migration runs in its own transaction, in order, exactly once.
  */
+import { SCHEMA_V3, SCHEMA_V3_COLUMNS } from "./schema-lines.js";
 const SCHEMA_V1 = `
 CREATE TABLE sessions (
   sid            INTEGER PRIMARY KEY,
   id             TEXT NOT NULL UNIQUE,      -- file name stem: <uuid>, codex-<id> or agent-<id>
   project        TEXT NOT NULL,             -- encoded project dir, e.g. -work-app
-  cwd            TEXT,
+  cwd            TEXT,                      -- (v3 adds index_rev, context_copied: see schema-lines.ts)
   git_branch     TEXT,
-  source         TEXT NOT NULL,             -- 'claude' | 'codex'
+  source         TEXT NOT NULL,             -- 'claude' | 'codex' | 'pi'
   is_subagent    INTEGER NOT NULL DEFAULT 0,
   parent_session TEXT,                      -- parent session id for subagents
   title          TEXT,                      -- custom/AI title, or the subagent's description
@@ -172,6 +173,14 @@ ALTER TABLE files ADD COLUMN pending_tools TEXT NOT NULL DEFAULT '';
 UPDATE sessions SET id = id || '@' || parent_session
   WHERE is_subagent = 1 AND parent_session IS NOT NULL AND instr(id, '@') = 0;
 `;
+/** Add each column its table does not have yet (a column added by hand or a half-run upgrade is kept). */
+function addColumns(db, columns) {
+    for (const [table, column, definition] of columns) {
+        const has = db.prepare(`SELECT name FROM pragma_table_info('${table}')`).pluck().all().includes(column);
+        if (!has)
+            db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+    }
+}
 export const MIGRATIONS = [
     {
         version: 1,
@@ -182,6 +191,15 @@ export const MIGRATIONS = [
         version: 2,
         description: "slim messages + message_text, FTS scope column, pending tool calls, subagent ids per parent",
         up: (db) => db.exec(SCHEMA_V2),
+    },
+    {
+        // No backfill: stored rows cannot give back their lines' uuids. A rebuild records them all.
+        version: 3,
+        description: "one row per Claude line: line_uuids, sessions.index_rev and context_copied, pre-v3 cutoffs",
+        up: (db) => {
+            addColumns(db, SCHEMA_V3_COLUMNS);
+            db.exec(SCHEMA_V3);
+        },
     },
 ];
 /** The FTS `scope` value of a message: its session and role as two tokens. */

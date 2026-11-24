@@ -11,6 +11,7 @@ const NEWLINE = 0x0a;
  */
 export function readLines(fd, start, maxBytes) {
     const lines = [];
+    const starts = [];
     let position = start;
     let end = start;
     // Pieces of a line that spans chunk boundaries (kept as a list: no quadratic concat).
@@ -19,7 +20,7 @@ export function readLines(fd, start, maxBytes) {
         const chunk = Buffer.allocUnsafe(CHUNK);
         const read = readSync(fd, chunk, 0, CHUNK, position);
         if (read === 0)
-            return { lines, end, eof: true };
+            return { lines, starts, end, eof: true };
         position += read;
         const data = chunk.subarray(0, read);
         let lineStart = 0;
@@ -27,9 +28,11 @@ export function readLines(fd, start, maxBytes) {
         while (newline !== -1) {
             const piece = data.subarray(lineStart, newline);
             const line = partial.length ? Buffer.concat([...partial, piece]) : piece;
-            end += line.length + 1;
-            if (line.length)
+            if (line.length) {
                 lines.push(line);
+                starts.push(end);
+            }
+            end += line.length + 1;
             partial = [];
             lineStart = newline + 1;
             newline = data.indexOf(NEWLINE, lineStart);
@@ -37,6 +40,6 @@ export function readLines(fd, start, maxBytes) {
         if (lineStart < data.length)
             partial.push(data.subarray(lineStart));
     }
-    return { lines, end, eof: false };
+    return { lines, starts, end, eof: false };
 }
 //# sourceMappingURL=line-reader.js.map

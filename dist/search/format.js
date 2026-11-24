@@ -35,8 +35,8 @@ function contextLine(label, m) {
 }
 export function formatHit(hit, index) {
     const tags = [];
-    if (hit.source === "codex")
-        tags.push("codex");
+    if (hit.source !== "claude")
+        tags.push(hit.source);
     if (hit.isSubagent)
         tags.push(`subagent of ${hit.parentSession ?? "unknown session"}`);
     if (hit.legacy)

@@ -86,11 +86,11 @@ export function createServer(options: { cwd?: string } = {}): { server: McpServe
   server.tool(
     "search_history",
     [
-      "Full-text search of past Claude Code and Codex conversations (prose, commands, file paths, tool output).",
+      "Full-text search of past Claude Code, Codex and pi conversations (prose, commands, file paths, tool output).",
       "Returns one line per session: project, date, session id, role and message number, and a snippet around the matched words (**bold**).",
       "Query tips: all words must match (falls back to partial matches when too few); \"quoted phrase\"; a OR b;",
       "identifiers like index.msgpack, ERR_SQLITE_ERROR or src/server.ts work as typed.",
-      "Filters in the query: project:name branch:name tool:Bash role:user|assistant|tool source:claude|codex",
+      "Filters in the query: project:name branch:name tool:Bash role:user|assistant|tool source:claude|codex|pi",
       "session:<id> after:7d before:2026-01-15 (h/d/w/m/y or ISO dates).",
       "Then call read_session(session_id, around=<#>) to read what happened.",
     ].join(" "),
@@ -127,7 +127,7 @@ export function createServer(options: { cwd?: string } = {}): { server: McpServe
 
   server.tool(
     "list_projects",
-    "List projects with Claude Code or Codex history: sessions, messages, subagent runs and active dates.",
+    "List projects with Claude Code, Codex or pi history: sessions, messages, subagent runs and active dates.",
     {
       sort_by: z.enum(["recent", "sessions", "messages", "name"]).optional().describe("Sort order (default: recent)"),
       limit: z.number().optional().describe("Maximum projects to list (default: 30, max: 200)"),

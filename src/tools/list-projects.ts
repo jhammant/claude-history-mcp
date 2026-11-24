@@ -1,3 +1,4 @@
+import { SOURCES, SOURCE_LABELS, type Source } from "../formats/types.js";
 import type { DB } from "../db/database.js";
 import { formatDateTime, projectName } from "../search/format.js";
 import { decodeProjectPath } from "../utils/path-encoder.js";
@@ -7,7 +8,6 @@ interface ProjectRow {
   cwd: string | null;
   sessions: number;
   subagents: number;
-  codex: number;
   messages: number;
   first: number | null;
   last: number | null;
@@ -18,17 +18,31 @@ const MAX_LIMIT = 200;
 
 /**
  * Projects with history, newest first by default. Capped, because a long-lived database
- * holds hundreds of projects and the caller is a model with a context budget.
+ * holds hundreds of projects and the caller is a model with a context budget. Codex and pi
+ * sessions with no messages (empty Codex guardian-review threads) are left out of the rows
+ * and their counts; every Claude session is counted, as before.
  */
 export function handleListProjects(db: DB, args: { sort_by?: string; limit?: number; query?: string }): string {
   const all = db
     .prepare(
       `SELECT project, max(cwd) AS cwd,
-         sum(is_subagent = 0) AS sessions, sum(is_subagent) AS subagents, sum(source = 'codex') AS codex,
+         sum(is_subagent = 0) AS sessions, sum(is_subagent) AS subagents,
          sum(message_count) AS messages, min(start_time) AS first, max(end_time) AS last
-       FROM sessions GROUP BY project`
+       FROM sessions WHERE source = 'claude' OR message_count > 0 GROUP BY project`
     )
     .all() as ProjectRow[];
+  // Per source: top-level sessions (Codex and pi ones with at least one message), so the breakdown matches the headline's scope.
+  const sourceRows = db
+    .prepare(
+      `SELECT project, source, count(*) AS n FROM sessions WHERE (source = 'claude' OR message_count > 0) AND is_subagent = 0
+       GROUP BY project, source`
+    )
+    .all() as Array<{ project: string; source: string; n: number }>;
+  const bySource = new Map<string, Map<string, number>>();
+  for (const r of sourceRows) {
+    if (!bySource.has(r.project)) bySource.set(r.project, new Map());
+    bySource.get(r.project)!.set(r.source, r.n);
+  }
   if (all.length === 0) return "No projects with conversation history found.";
 
   const query = args.query?.trim().toLowerCase();
@@ -62,7 +76,7 @@ export function handleListProjects(db: DB, args: { sort_by?: string; limit?: num
   for (const row of shown) {
     const extras = [
       row.subagents ? `${row.subagents} subagent runs` : "",
-      row.codex ? `${row.codex} Codex` : "",
+      ...sourceCounts(bySource.get(row.project)),
     ].filter(Boolean);
     lines.push(
       `- ${projectName(row.project, row.cwd)} — ${row.sessions} sessions, ${row.messages} messages` +
@@ -75,4 +89,11 @@ export function handleListProjects(db: DB, args: { sort_by?: string; limit?: num
     lines.push("", `${rows.length - shown.length} more not shown. Narrow with query, or raise limit (max ${MAX_LIMIT}).`);
   }
   return lines.join("\n");
+}
+
+/** "2 Claude", "1 pi" for each source present; nothing when the project is all Claude (the default, no need to say). */
+function sourceCounts(counts: Map<string, number> | undefined): string[] {
+  const present = SOURCES.filter((s: Source) => (counts?.get(s) ?? 0) > 0);
+  if (present.length === 0 || (present.length === 1 && present[0] === "claude")) return [];
+  return present.map((s) => `${counts!.get(s)} ${SOURCE_LABELS[s]}`);
 }
