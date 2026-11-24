@@ -171,7 +171,7 @@ database can hold several machines and `list_projects` can show one project once
   directory. Other files there (another machine's, in a shared or synced folder) are
   ignored, so one machine's entries never apply to another. Malformed lines, relative paths
   and `..` paths are ignored, and a newer entry (by its `at` time) replaces an older one for
-  the same directory.
+  the same directory; on equal times the later line wins.
 
 Upgrading: the database migrates in place to schema version 4 on the next `sweep`. A session
 indexed earlier shows host `unknown` until it is next indexed, and until then it is keyed by

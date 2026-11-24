@@ -123,6 +123,15 @@ describe('loadRepoMaps', () => {
     expect(rows(db)).toEqual([{ dir: '/w/a', root: '/w/new', remote: null, at: 11 }]);
   });
 
+  it('on a tie in one file the later line wins', () => {
+    put('boxa.jsonl', [
+      line({ dir: '/w/a', root: '/w/first', remote: null, at: 10 }),
+      line({ dir: '/w/a', root: '/w/second', remote: null, at: 10 }),
+    ]);
+    loadRepoMaps(db, meta(), 'laptop');
+    expect(rows(db)).toEqual([{ dir: '/w/a', root: '/w/second', remote: null, at: 10 }]);
+  });
+
   it('merges files from several machines and nested directories, newest line winning', () => {
     put('boxa.jsonl', [line({ dir: '/w/a', root: '/w/a1', remote: null, at: 5 })]);
     put('sub/boxb.jsonl', [line({ dir: '/w/a', root: '/w/a2', remote: null, at: 6 }), line({ dir: '/w/b', root: '/w/b', remote: null, at: 1 })]);

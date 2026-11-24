@@ -3,6 +3,8 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSy
 import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { openDatabase } from "../../src/db/database.js";
+import { loadRepoMaps } from "../../src/repos/map.js";
 import { runCommand } from "../../src/cli/commands.js";
 import { probeRepo, recordRepos } from "../../src/repos/probe.js";
 
@@ -69,6 +71,20 @@ describe.skipIf(!hasGit)("git probe", () => {
     ]);
   });
 
+  it("returns nothing for a file, an empty path, or a missing directory", () => {
+    expect(probeRepo(join(repo, "a.txt"))).toEqual([]);
+    expect(probeRepo(join(repo, "missing", "deeper"))).toEqual([]);
+    // git -C "" is a no-op, which would probe the process's own directory
+    const saved = process.cwd();
+    try {
+      process.chdir(repo);
+      expect(probeRepo("")).toEqual([]);
+    } finally {
+      process.chdir(saved);
+    }
+    expect(probeRepo(repo)).toHaveLength(1);
+  });
+
   it("returns nothing for a plain directory, a missing directory, or when git is not on PATH", () => {
     const plain = join(tmp, "plain");
     mkdirSync(plain);
@@ -113,6 +129,26 @@ describe.skipIf(!hasGit)("git probe", () => {
     expect(newest()).toBe("https://example.com/acme/a.git");
     expect(recordRepos([repo], { mapDir, host: "laptop", now: 1_800_000_004 })).toBe(0);
     expect(readFileSync(file, "utf8").trim().split("\n")).toHaveLength(3);
+  });
+
+  it("stores a remote changed within the same second as the previous probe, not one probe late", () => {
+    const at = Math.floor(Date.now() / 1000) - 1000;
+    const dbDir = join(tmp, "db");
+    mkdirSync(dbDir);
+    const db = openDatabase(join(dbDir, "history.db"), { create: true });
+    try {
+      git(repo, "remote", "add", "origin", "https://example.com/acme/a.git");
+      expect(recordRepos([repo], { mapDir, host: "laptop", now: at })).toBe(1);
+      loadRepoMaps(db, mapDir, "laptop", { file: "laptop.jsonl" });
+      git(repo, "remote", "set-url", "origin", "https://example.com/acme/b.git");
+      expect(recordRepos([repo], { mapDir, host: "laptop", now: at })).toBe(1);
+      loadRepoMaps(db, mapDir, "laptop", { file: "laptop.jsonl" });
+      expect(db.prepare("SELECT remote FROM repo_map WHERE dir = ?").pluck().get(repo)).toBe("https://example.com/acme/b.git");
+      // and the same value is not appended again
+      expect(recordRepos([repo], { mapDir, host: "laptop", now: at })).toBe(0);
+    } finally {
+      db.close();
+    }
   });
 
   it("keeps the mode of a map directory that already exists, and still writes the file 0600", () => {

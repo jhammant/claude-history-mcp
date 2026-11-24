@@ -131,7 +131,7 @@ export function loadRepoMaps(
       if (!entry) continue;
       entries++;
       const prior = newest.get(entry.dir);
-      if (!prior || entry.at > prior.at) newest.set(entry.dir, entry);
+      if (!prior || entry.at >= prior.at) newest.set(entry.dir, entry);
     }
   }
   if (newest.size === 0) return { files, entries, changed: false };
