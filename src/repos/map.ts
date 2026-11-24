@@ -4,7 +4,7 @@
  * its main repository root and origin URL. The files are untrusted input.
  */
 
-import { readdirSync, readFileSync, statSync } from "fs";
+import { lstatSync, readdirSync, readFileSync, statSync } from "fs";
 import { join } from "path";
 import type { DB } from "../db/database.js";
 import { normaliseRemote, stripRemoteCredentials } from "./url.js";
@@ -80,10 +80,29 @@ function listJsonl(dir: string, out: string[], depth = 0): void {
   }
 }
 
-/** Read every map file in mapDir, store each entry under `host`, and upsert entries with a newer `at`. `changed` is true when a row was written. */
-export function loadRepoMaps(db: DB, mapDir: string, host: string): { files: number; entries: number; changed: boolean } {
+/** `<mapDir>/<file>` when it is a regular file (a symlink is not followed), else nothing. */
+function namedFile(mapDir: string, file: string, out: string[]): void {
+  const full = join(mapDir, file);
+  try {
+    if (lstatSync(full).isFile()) out.push(full);
+  } catch {
+    // missing
+  }
+}
+
+/**
+ * Read the map files in mapDir, store each entry under `host`, and upsert entries with a newer
+ * `at`. `changed` is true when a row was written. By default every `*.jsonl` file below mapDir is
+ * read (a directory that holds one host's files); `options.file` reads that one file only, as
+ * the local sweep does with `<host>.jsonl`, so another host's file in a shared directory never
+ * applies to this host.
+ */
+export function loadRepoMaps(
+  db: DB, mapDir: string, host: string, options: { file?: string } = {},
+): { files: number; entries: number; changed: boolean } {
   const paths: string[] = [];
-  listJsonl(mapDir, paths);
+  if (options.file !== undefined) namedFile(mapDir, options.file, paths);
+  else listJsonl(mapDir, paths);
   paths.sort();
   const nowSeconds = Date.now() / 1000;
   const newest = new Map<string, Entry>();

@@ -3,7 +3,6 @@ import { join } from 'path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { getMeta } from '../../src/db/database.js';
 import { sweep, topUp } from '../../src/indexing/sweep.js';
-import { loadRepoMaps } from '../../src/repos/map.js';
 import { REPO_NEW_DIR_KEY } from '../../src/repos/resolve.js';
 import { useHost } from '../helpers/host.js';
 import { createCorpus, userLine, type Corpus } from '../helpers/corpus.js';
@@ -136,14 +135,20 @@ describe('strong evidence only', () => {
   });
 
   it("does not fold on another host's map evidence", () => {
-    // Entries another machine's map holds for it: a sweep on this host never loads them as its own.
-    const mapDir = join(corpus.dataDir, 'desktop-map');
+    // Another machine's file in the shared map directory: a sweep here never loads it.
+    const mapDir = join(corpus.dataDir, 'repo-map');
     mkdirSync(mapDir, { recursive: true });
     writeFileSync(join(mapDir, 'desktop.jsonl'), JSON.stringify({ dir: '/w/hf', root: '/w/hf', remote: null, at: 1 }) + '\n');
     const db = corpus.open();
-    loadRepoMaps(db, mapDir, 'desktop');
     write('-w-hf--worktrees-x', 'wt', '/w/hf/.worktrees/x', '');
     sweep(db, NO_GIT);
+    expect(repo('wt')).toBe('laptop:/w/hf/.worktrees/x');
+    expect(db.prepare('SELECT count(*) FROM repo_map').pluck().get()).toBe(0);
+    // on its own host the same file is evidence
+    process.env.CLAUDE_HISTORY_HOST = 'desktop';
+    write('-w-hf--worktrees-x', 'desk-wt', '/w/hf/.worktrees/x', '');
+    sweep(db, NO_GIT);
+    expect(repo('desk-wt')).toBe('desktop:/w/hf');
     expect(repo('wt')).toBe('laptop:/w/hf/.worktrees/x');
   });
 

@@ -170,14 +170,16 @@ function hostDirs(db: DB, sids: Iterable<number> | null): string[] {
 
 /**
  * Repository attribution: probe git for the directories (the map file is the single record, so a
- * rebuild keeps worktrees deleted since), load the files, and run the full pass when the map,
- * the resolver stamp or the new-directory flag says it is due. New sessions are resolved as
- * their files are indexed; an idle sweep costs a read of the map file and two meta reads.
+ * rebuild keeps worktrees deleted since), load this host's own map file, and run the full pass
+ * when the map, the resolver stamp or the new-directory flag says it is due. New sessions are
+ * resolved as their files are indexed; an idle sweep costs a read of the map file and two meta
+ * reads.
  */
 function resolveRepositories(db: DB, indexed: Set<number>, probe: boolean): void {
   const stampChanged = getMeta(db, "repo_resolved") !== repoResolvedStamp();
   if (probe) recordRepos(hostDirs(db, stampChanged ? null : indexed), { mapDir: CONFIG.repoMapDir, host: CONFIG.host });
-  const maps = loadRepoMaps(db, CONFIG.repoMapDir, CONFIG.host);
+  // Only this host's own file: another host's file in a shared map directory never applies here.
+  const maps = loadRepoMaps(db, CONFIG.repoMapDir, CONFIG.host, { file: `${CONFIG.host}.jsonl` });
   if (maps.changed || stampChanged || getMeta(db, REPO_NEW_DIR_KEY) !== undefined) {
     db.transaction(() => {
       resolveAllSessions(db);

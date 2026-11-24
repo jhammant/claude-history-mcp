@@ -26,7 +26,7 @@ describe('one repository across directories and sources', () => {
   beforeEach(() => {
     corpus = createCorpus();
     mkdirSync(join(corpus.dataDir, 'repo-map'), { recursive: true });
-    writeFileSync(join(corpus.dataDir, 'repo-map', 'box.jsonl'), [
+    writeFileSync(join(corpus.dataDir, 'repo-map', 'laptop.jsonl'), [
       { dir: '/work/app', root: '/work/app', remote: REMOTE, at: 1 },
       { dir: '/work/wt-x', root: '/work/app', remote: REMOTE, at: 2 },
     ].map((l) => JSON.stringify(l)).join('\n') + '\n');

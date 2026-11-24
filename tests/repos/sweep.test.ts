@@ -54,7 +54,7 @@ describe('repository identity through the indexer and the sweep', () => {
     const before = offset();
 
     mkdirSync(join(corpus.dataDir, 'repo-map'), { recursive: true });
-    writeFileSync(join(corpus.dataDir, 'repo-map', 'box.jsonl'),
+    writeFileSync(join(corpus.dataDir, 'repo-map', 'laptop.jsonl'),
       JSON.stringify({ dir: '/work/wt', root: '/work/main', remote: 'https://h.example/o/main.git', at: 5 }) + '\n');
     sweep(db, NO_GIT);
 
@@ -188,6 +188,33 @@ describe('sweep repository step', () => {
     const stats = sweep(db, NO_GIT);
     expect(stats.repoError).toBeUndefined();
     expect(db.prepare('SELECT host FROM sessions').pluck().get()).toBe(''); // untouched file: still unknown
+  });
+
+  it("loads only this host's map file", () => {
+    const mapDir = join(corpus.dataDir, 'repo-map');
+    mkdirSync(mapDir, { recursive: true });
+    const entry = (remote: string, at: number) => JSON.stringify({ dir: '/w/app', root: '/w/app', remote, at }) + '\n';
+    // one shared map directory (a synced home): each host's file names the same directory differently
+    writeFileSync(join(mapDir, 'laptop.jsonl'), entry('https://example.com/acme/laptop-app.git', 1));
+    writeFileSync(join(mapDir, 'desktop.jsonl'), entry('https://example.com/acme/desktop-app.git', 2));
+    const db = corpus.open();
+    const mapRows = () => db.prepare('SELECT host, dir, remote FROM repo_map ORDER BY host').all();
+    const repoOf = (id: string) => db.prepare('SELECT repo FROM sessions WHERE id = ?').pluck().get(id);
+
+    corpus.write(corpus.sessionPath('-w-app', 'lap'), [userLine('hi', { cwd: '/w/app', sessionId: 'lap', gitBranch: '' })]);
+    sweep(db, NO_GIT);
+    expect(mapRows()).toEqual([{ host: 'laptop', dir: '/w/app', remote: 'https://example.com/acme/laptop-app.git' }]);
+    expect(repoOf('lap')).toBe('example.com/acme/laptop-app');
+
+    process.env.CLAUDE_HISTORY_HOST = 'desktop';
+    corpus.write(corpus.sessionPath('-w-app', 'desk'), [userLine('hi', { cwd: '/w/app', sessionId: 'desk', gitBranch: '' })]);
+    sweep(db, NO_GIT);
+    expect(mapRows()).toEqual([
+      { host: 'desktop', dir: '/w/app', remote: 'https://example.com/acme/desktop-app.git' },
+      { host: 'laptop', dir: '/w/app', remote: 'https://example.com/acme/laptop-app.git' },
+    ]);
+    expect(repoOf('desk')).toBe('example.com/acme/desktop-app');
+    expect(repoOf('lap')).toBe('example.com/acme/laptop-app');
   });
 
   it('does not run git from the query-time top-up', () => {

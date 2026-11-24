@@ -75,6 +75,19 @@ describe('loadRepoMaps', () => {
     expect(db.prepare('SELECT host FROM repo_map').all()).toEqual([{ host: 'desktop' }]);
   });
 
+  it('reads only the named file when given one, and nothing when it is missing or not a regular file', () => {
+    put('laptop.jsonl', [line({ dir: '/w/a', root: '/w/a', remote: null, at: 1 })]);
+    put('desktop.jsonl', [line({ dir: '/w/b', root: '/w/b', remote: null, at: 1 })]);
+    put('sub/laptop.jsonl', [line({ dir: '/w/c', root: '/w/c', remote: null, at: 1 })]);
+    expect(loadRepoMaps(db, meta(), 'laptop', { file: 'laptop.jsonl' })).toEqual({ files: 1, entries: 1, changed: true });
+    expect(rows(db).map((r) => (r as { dir: string }).dir)).toEqual(['/w/a']);
+    expect(loadRepoMaps(db, meta(), 'pc', { file: 'pc.jsonl' })).toEqual({ files: 0, entries: 0, changed: false });
+    symlinkSync(join(meta(), 'desktop.jsonl'), join(meta(), 'linked.jsonl'));
+    expect(loadRepoMaps(db, meta(), 'linked', { file: 'linked.jsonl' })).toEqual({ files: 0, entries: 0, changed: false });
+    mkdirSync(join(meta(), 'dir.jsonl'));
+    expect(loadRepoMaps(db, meta(), 'dir', { file: 'dir.jsonl' })).toEqual({ files: 0, entries: 0, changed: false });
+  });
+
   it('strips credentials from a remote in a map line', () => {
     put('boxa.jsonl', [line({ dir: '/w/a', root: '/w/a', remote: 'https://user:tok@example.com/acme/app.git', at: 1 })]);
     loadRepoMaps(db, meta(), 'laptop');
