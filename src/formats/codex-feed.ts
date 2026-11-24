@@ -16,6 +16,8 @@ export const codexFeedFormat: TranscriptFormat = {
   source: "codex",
   root: () => CONFIG.codexProjectsDir,
   projectFromContent: false,
+  // A session also present as a native rollout is fed by whichever file is indexed first.
+  firstFileWins: true,
   list(root: string): TranscriptFile[] {
     const out: TranscriptFile[] = [];
     for (const project of readDir(root)) {

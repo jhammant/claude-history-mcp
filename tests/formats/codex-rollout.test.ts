@@ -321,6 +321,45 @@ describe('codex rollout format', () => {
       expect(corpus.open().prepare('SELECT count(*) AS n FROM files').get()).toEqual({ n: 1 });
     });
 
+    it('skips a feed file whose session id a rollout already indexed, with one log line', () => {
+      const rolloutFile = corpus.write(corpus.rolloutPath(DATE, U1), [rolloutMeta(U1), rolloutMessage('user', 'from the rollout')]);
+      index(rolloutFile);
+      const feedPath = corpus.write(corpus.codexPath('-work-app', `codex-${U1}`), [
+        { type: 'user', cwd: '/work/app', timestamp: '2026-10-01T09:00:00Z', message: { role: 'user', content: 'from the feed' } },
+      ]);
+      const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+      expect(index(feedPath).status).toBe('unchanged');
+      corpus.append(feedPath, [{ type: 'assistant', timestamp: '2026-10-01T09:01:00Z', message: { role: 'assistant', content: 'feed reply' } }]);
+      index(feedPath); // later runs: no second line
+      expect(error).toHaveBeenCalledTimes(1);
+      expect(String(error.mock.calls[0][0])).toContain(`codex-${U1}`);
+      expect(messages(`codex-${U1}`).map((m) => m.prose)).toEqual(['from the rollout']);
+      expect(corpus.open().prepare('SELECT count(*) AS n FROM files').get()).toEqual({ n: 1 });
+    });
+
+    it('indexes a session present as both feed and rollout once, whichever is indexed first', () => {
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      const counts = ([['feed', 'rollout'], ['rollout', 'feed']] as const).map((order) => {
+        const c = createCorpus();
+        try {
+          const paths = {
+            feed: c.write(c.codexPath('-work-app', `codex-${U1}`), [
+              { type: 'user', cwd: '/work/app', timestamp: '2026-10-01T09:00:00Z', message: { role: 'user', content: 'the question' } },
+              { type: 'assistant', timestamp: '2026-10-01T09:00:05Z', message: { role: 'assistant', content: 'the answer' } },
+            ]),
+            rollout: c.write(c.rolloutPath(DATE, U1), [
+              rolloutMeta(U1), rolloutMessage('user', 'the question'), rolloutMessage('assistant', 'the answer'),
+            ]),
+          };
+          for (const kind of order) indexFile(c.open(), c.file(paths[kind]));
+          return c.open().prepare('SELECT count(*) FROM messages').pluck().get();
+        } finally {
+          c.cleanup();
+        }
+      });
+      expect(counts).toEqual([2, 2]);
+    });
+
     it('skips a second rollout file with the same session id at another path, logging once', () => {
       const first = corpus.write(corpus.rolloutPath(DATE, U1), [rolloutMeta(U1), rolloutMessage('user', 'original')]);
       const second = corpus.write(corpus.rolloutPath('2026-10-02', U1), [rolloutMeta(U1), rolloutMessage('user', 'copy')]);
