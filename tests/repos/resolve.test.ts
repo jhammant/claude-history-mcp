@@ -4,7 +4,7 @@ import { join } from 'path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { openDatabase, type DB } from '../../src/db/database.js';
 import {
-  distinctNames, foldWorktreePath, lastSegment, pathKey, repoResolvedStamp, repoResolver, resolveAllSessions,
+  distinctNames, foldWorktreePath, lastSegment, pathKey, repoName, repoResolvedStamp, repoResolver, resolveAllSessions,
 } from '../../src/repos/resolve.js';
 
 describe('foldWorktreePath', () => {
@@ -320,5 +320,19 @@ describe('distinctNames', () => {
     expect(names.get('example.com/acme/tools')).toBe('tools');
     expect(names.get('example.com/acme/app')).toBe('/home/me/app');
     expect(names.get('laptop:/home/me/other/app')).toBe('/home/me/other/app');
+  });
+
+  it('never puts a host prefix in a name, and agrees with Repo.name', () => {
+    const names = distinctNames([
+      { key: 'laptop:/', root: '/' },
+      { key: 'desktop:/home/me/app', root: null },
+      { key: 'example.com:8080/acme/tools', root: null },
+    ], (root) => root);
+    expect(names.get('laptop:/')).toBe('/');
+    expect(names.get('desktop:/home/me/app')).toBe('app');
+    expect(names.get('example.com:8080/acme/tools')).toBe('tools');
+    expect(repoName('laptop:/home/me/app')).toBe('app');
+    expect(repoName('/home/me/app')).toBe('app');
+    expect(repoName('example.com/acme/app')).toBe('app');
   });
 });

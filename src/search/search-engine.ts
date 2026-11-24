@@ -17,6 +17,7 @@
  */
 
 import { CONFIG } from "../config.js";
+import { reposForProjectFilter } from "../tools/project-match.js";
 import { hostCount } from "./format.js";
 import type { DB } from "../db/database.js";
 import {
@@ -128,11 +129,14 @@ function hasSessionFilter(filters: QueryFilters): boolean {
  * time span overlaps the after/before range: a superset of the sessions with a message
  * in range, used to narrow the search before the exact per-message date check.
  */
-function sessionClauses(filters: QueryFilters, params: Record<string, unknown>, dateRange: boolean): string[] {
+function sessionClauses(filters: QueryFilters, params: Record<string, unknown>, dateRange: boolean, projectRepos: string[] = []): string[] {
   const clauses: string[] = [];
   if (filters.project) {
     params.project = `%${likeEscape(filters.project)}%`;
-    clauses.push("(s.project LIKE @project ESCAPE '\\' OR s.cwd LIKE @project ESCAPE '\\')");
+    // Also every session of a repository the filter names or reaches (its worktrees, other paths).
+    const repos = projectRepos.length ? " OR s.repo IN (SELECT value FROM json_each(@projectRepos))" : "";
+    if (repos) params.projectRepos = JSON.stringify(projectRepos);
+    clauses.push(`(s.project LIKE @project ESCAPE '\\' OR s.cwd LIKE @project ESCAPE '\\'${repos})`);
   }
   if (filters.branch) {
     params.branch = `%${likeEscape(filters.branch)}%`;
@@ -195,6 +199,18 @@ function boost(c: Omit<Candidate, "score">, currentProject: string | undefined, 
 export class SearchEngine {
   constructor(private db: DB) {}
 
+  /** Set per search() call: the repositories its project filter reaches, computed once. */
+  private repoMemo: { filter: string; repos: string[] } | null = null;
+
+  /** The repositories a project filter reaches (see reposForProjectFilter). */
+  private projectRepos(filters: QueryFilters): string[] {
+    if (!filters.project) return [];
+    if (this.repoMemo?.filter !== filters.project) {
+      this.repoMemo = { filter: filters.project, repos: reposForProjectFilter(this.db, filters.project) };
+    }
+    return this.repoMemo.repos;
+  }
+
   /**
    * The filters that can run inside the MATCH, as scope expressions. `none` when the
    * session filters match no session at all.
@@ -203,7 +219,7 @@ export class SearchEngine {
     const exprs: string[] = [];
     if (hasSessionFilter(filters)) {
       const params: Record<string, unknown> = {};
-      const clauses = sessionClauses(filters, params, true);
+      const clauses = sessionClauses(filters, params, true, this.projectRepos(filters));
       const max = CONFIG.search.scopeMaxSessions;
       const sids = this.db
         .prepare(`SELECT sid FROM sessions s WHERE ${clauses.join(" AND ")} LIMIT ${max + 1}`)
@@ -218,7 +234,7 @@ export class SearchEngine {
 
   private candidates(match: string | null, filters: QueryFilters, sort: SortOrder, currentProject?: string): Candidate[] {
     const params: Record<string, unknown> = { cap: CONFIG.search.candidateCap };
-    const clauses = [...sessionClauses(filters, params, false), ...messageClauses(filters, params)];
+    const clauses = [...sessionClauses(filters, params, false, this.projectRepos(filters)), ...messageClauses(filters, params)];
     const [wp, wi, wo] = CONFIG.search.weights;
     let sql: string;
     if (match) {
@@ -397,6 +413,7 @@ export class SearchEngine {
   }
 
   search(rawQuery: string, options: SearchOptions = {}): SearchResponse {
+    this.repoMemo = null; // sessions may have been indexed since the last call
     const query = parseQuery(rawQuery);
     if (options.project && !query.filters.project) query.filters.project = options.project;
     const limit = Math.max(1, Math.min(Math.floor(options.limit ?? CONFIG.search.defaultLimit), CONFIG.search.maxLimit));

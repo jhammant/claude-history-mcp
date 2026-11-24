@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { sweep } from '../../src/indexing/sweep.js';
 import { handleListProjects } from '../../src/tools/list-projects.js';
+import { SearchEngine } from '../../src/search/search-engine.js';
+import { matchProjects } from '../../src/tools/project-match.js';
 import { assistantText, createCorpus, rolloutMessage, rolloutMeta, userLine, type Corpus } from '../helpers/corpus.js';
 
 describe('list_projects', () => {
@@ -40,7 +42,7 @@ describe('list_projects', () => {
     const text = handleListProjects(corpus.open(), { query: 'Billing' });
 
     expect(text).toContain('1 project with conversation history matching "Billing":');
-    expect(text).toContain('- /work/billing — 1 sessions, 2 messages');
+    expect(text).toContain('- billing — 1 sessions, 2 messages');
     expect(text).not.toContain('more not shown');
   });
 
@@ -65,7 +67,7 @@ describe('list_projects', () => {
     expect(text).toContain('35 projects with conversation history:');
     expect(text).not.toMatch(/unknown/i);
     // A Claude session with no messages is counted, as it always was.
-    expect(handleListProjects(db, { query: 'billing' })).toContain('- /work/billing — 2 sessions, 2 messages');
+    expect(handleListProjects(db, { query: 'billing' })).toContain('- billing — 2 sessions, 2 messages');
   });
 
   it('still lists a project whose only Claude session has no messages', () => {
@@ -78,5 +80,112 @@ describe('list_projects', () => {
 
     expect(text).toContain('36 projects with conversation history:');
     expect(text).toMatch(/- \S*quiet — 1 sessions, 0 messages/);
+  });
+});
+
+describe('list_projects across hosts', () => {
+  let corpus: Corpus;
+  let saved: string | undefined;
+  beforeEach(() => { corpus = createCorpus(); saved = process.env.CLAUDE_HISTORY_HOST; });
+  afterEach(() => {
+    if (saved === undefined) delete process.env.CLAUDE_HISTORY_HOST; else process.env.CLAUDE_HISTORY_HOST = saved;
+    corpus.cleanup();
+  });
+  const onHost = (host: string, write: () => void) => {
+    process.env.CLAUDE_HISTORY_HOST = host;
+    write();
+    sweep(corpus.open(), { probeRepos: false });
+  };
+
+  it('lists the same path on two hosts as two rows when neither has a remote', () => {
+    for (const host of ['laptop', 'desktop']) {
+      onHost(host, () => corpus.write(corpus.sessionPath('-home-me-app', `s-${host}`), [
+        userLine('hello', { cwd: '/home/me/app', sessionId: `s-${host}` }),
+        assistantText('hi', { cwd: '/home/me/app', sessionId: `s-${host}` }),
+      ]));
+    }
+    const db = corpus.open();
+    expect(db.prepare('SELECT DISTINCT repo FROM sessions ORDER BY repo').pluck().all())
+      .toEqual(['desktop:/home/me/app', 'laptop:/home/me/app']);
+
+    const out = handleListProjects(db, {});
+
+    expect(out.match(/^- /gm)).toHaveLength(2);
+    expect(out).not.toContain('laptop:/');
+    expect(out).not.toContain('desktop:/');
+    expect(out).toMatch(/^- app \(1\) — 1 sessions/m);
+    expect(out).toMatch(/^- app \(2\) — 1 sessions/m);
+    expect(out).toContain('  Hosts: laptop');
+    expect(out).toContain('  Hosts: desktop');
+  });
+
+  it('lists one row with both hosts for a repository with a remote', () => {
+    for (const [host, n] of [['laptop', 1], ['desktop', 2]] as const) {
+      const u = `0199abcd-0000-7000-8000-00000000000${n}`;
+      onHost(host, () => corpus.write(corpus.rolloutPath('2026-10-01', u), [
+        rolloutMeta(u, { cwd: `/home/${host}/app`, repositoryUrl: 'https://example.com/acme/app.git' }),
+        rolloutMessage('user', 'hello there'),
+      ]));
+    }
+
+    const out = handleListProjects(corpus.open(), {});
+
+    expect(out.match(/^- /gm)).toHaveLength(1);
+    expect(out).toMatch(/^- app — 2 sessions/m);
+    expect(out).toContain('Hosts: desktop, laptop');
+    expect(out).not.toContain('example.com');
+  });
+
+  it('prints an empty host as unknown, and no Hosts line while there is only one host', () => {
+    onHost('laptop', () => corpus.write(corpus.sessionPath('-home-me-app', 'a'), [userLine('hi', { cwd: '/home/me/app', sessionId: 'a' })]));
+    expect(handleListProjects(corpus.open(), {})).not.toContain('Hosts:');
+    onHost('desktop', () => corpus.write(corpus.sessionPath('-home-me-b', 'b'), [userLine('hi', { cwd: '/home/me/b', sessionId: 'b' })]));
+    onHost('desktop', () => corpus.write(corpus.sessionPath('-home-me-c', 'c'), [userLine('hi', { cwd: '/home/me/c', sessionId: 'c' })]));
+    corpus.open().prepare("UPDATE sessions SET host = '' WHERE id = 'b'").run();
+    const out = handleListProjects(corpus.open(), {});
+    expect(out).toContain('Hosts: unknown');
+    expect(out).toContain('Hosts: laptop');
+  });
+
+  it('still counts a Claude session with no messages', () => {
+    onHost('laptop', () => corpus.write(corpus.sessionPath('-home-me-quiet', 'q'), [
+      userLine('', { cwd: '/home/me/quiet', sessionId: 'q', isMeta: true }),
+    ]));
+    expect(corpus.open().prepare("SELECT message_count FROM sessions WHERE id = 'q'").pluck().get()).toBe(0);
+
+    expect(handleListProjects(corpus.open(), {})).toMatch(/^- quiet — 1 sessions, 0 messages/m);
+  });
+});
+
+describe('a schema 3 database before any rebuild (repo NULL everywhere)', () => {
+  let corpus: Corpus;
+  beforeEach(() => {
+    corpus = createCorpus();
+    for (const [dir, id] of [['app', 'a1'], ['app', 'a2'], ['tools', 't1']]) {
+      corpus.write(corpus.sessionPath(`-work-${dir}`, id), [
+        userLine('gearbox question', { cwd: `/work/${dir}`, sessionId: id }),
+        assistantText('answer', { cwd: `/work/${dir}`, sessionId: id }),
+      ]);
+    }
+    sweep(corpus.open(), { probeRepos: false });
+    corpus.open().prepare('UPDATE sessions SET repo = NULL, repo_root = NULL').run();
+  });
+  afterEach(() => corpus.cleanup());
+
+  it('lists projects grouped by project dir, as parcel 1 did', () => {
+    const out = handleListProjects(corpus.open(), {});
+
+    expect(out).toContain('2 projects with conversation history:');
+    expect(out).toMatch(/^- \/work\/app — 2 sessions, 4 messages$/m);
+    expect(out).toMatch(/^- \/work\/tools — 1 sessions, 2 messages$/m);
+  });
+
+  it('matches projects and filters search by the project dir', () => {
+    const db = corpus.open();
+
+    expect(matchProjects(db, 'app')).toEqual(['-work-app']);
+    expect(matchProjects(db, '/work/tools')).toEqual(['-work-tools']);
+    expect(new SearchEngine(db).search('gearbox project:app').hits.map((h) => h.sessionId).sort()).toEqual(['a1', 'a2']);
+    expect(new SearchEngine(db).search('gearbox', { project: 'tools' }).hits.map((h) => h.sessionId)).toEqual(['t1']);
   });
 });

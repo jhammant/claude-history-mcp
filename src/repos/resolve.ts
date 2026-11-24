@@ -92,6 +92,15 @@ export function lastSegment(path: string): string {
   return parts[parts.length - 1] ?? path;
 }
 
+/**
+ * The display name of a repository key: the last segment of the remote (`host/owner/name`) or
+ * of the path in a path key. A path key's `<host>:` prefix is never part of the name, even when
+ * the path has no segment of its own (the filesystem root).
+ */
+export function repoName(key: string): string {
+  return lastSegment(key.replace(/^[^/]*:(?=\/)/, ""));
+}
+
 /** Where one host's repository evidence is read from: the database, or sets loaded once for a full pass. */
 interface EvidenceSource {
   /** `dir` is a repo_map dir or root of the host. */
@@ -125,7 +134,7 @@ export function distinctNames(
 ): Map<string, string> {
   const byName = new Map<string, Array<{ key: string; root: string | null }>>();
   for (const r of repos) {
-    const name = lastSegment(r.key);
+    const name = repoName(r.key);
     let list = byName.get(name);
     if (!list) byName.set(name, (list = []));
     if (!list.some((x) => x.key === r.key)) list.push(r);
