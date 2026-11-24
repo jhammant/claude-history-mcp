@@ -14,13 +14,13 @@ describe('migration 3: one row per Claude line', () => {
   beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'history-migrate-3-')); });
   afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
-  it('is the latest', () => {
-    expect(SCHEMA_VERSION).toBe(3);
+  it('is followed by migration 4', () => {
+    expect(SCHEMA_VERSION).toBe(4);
   });
 
-  it('takes a fresh database to 3 with the uuid table, its index, the cutoffs and the trigger', () => {
+  it('takes a fresh database to the latest with the uuid table, its index, the cutoffs and the trigger', () => {
     const db = openDatabase(join(dir, 'history.db'), { create: true });
-    expect(db.pragma('user_version', { simple: true })).toBe(3);
+    expect(db.pragma('user_version', { simple: true })).toBe(4);
     expect(names(db, 'table')).toEqual(expect.arrayContaining(['line_uuids', 'line_uuid_cutoffs']));
     expect(names(db, 'index')).toContain('line_uuids_session');
     expect(names(db, 'trigger')).toContain('messages_ad_line_uuids');
@@ -36,7 +36,7 @@ describe('migration 3: one row per Claude line', () => {
     session.run('empty', 'p', 'claude', null, 0);
     session.run('codex-1', 'p', 'codex', 7000, 3);
 
-    expect(migrate(db)).toEqual([3]);
+    expect(migrate(db)).toEqual([3, 4]);
 
     expect(db.prepare('SELECT count(*) FROM line_uuids').pluck().get()).toBe(0);
     expect(db.prepare('SELECT s.id, c.ts FROM line_uuid_cutoffs c JOIN sessions s ON s.sid = c.session_sid').all())
@@ -49,7 +49,7 @@ describe('migration 3: one row per Claude line', () => {
     const db = new Database(join(dir, 'history.db'));
     migrate(db, MIGRATIONS.filter((m) => m.version <= 2));
     db.exec('ALTER TABLE sessions ADD COLUMN index_rev INTEGER NOT NULL DEFAULT 0');
-    expect(migrate(db)).toEqual([3]);
+    expect(migrate(db)).toEqual([3, 4]);
     db.close();
   });
 

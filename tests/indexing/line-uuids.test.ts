@@ -696,7 +696,7 @@ describe('one Claude line, one row: a version 2 database upgraded without a rebu
 
     db = openDatabase(dbPath);
     try {
-      expect(db.pragma('user_version', { simple: true })).toBe(3);
+      expect(db.pragma('user_version', { simple: true })).toBe(4);
       expect(db.prepare('SELECT count(*) FROM line_uuid_cutoffs').pluck().get()).toBe(1);
       expect(db.prepare('SELECT count(*) FROM line_uuids').pluck().get()).toBe(0);
       // New lines in the copy indexed before the upgrade, then the twin appears with everything.

@@ -21,6 +21,8 @@ export interface QueryFilters {
   role?: Role;
   source?: Source;
   session?: string;
+  /** Machine name; "unknown" matches sessions indexed before hosts were recorded. */
+  host?: string;
 }
 
 /** One search term: the token parts FTS5 will see (several parts = a phrase). */
@@ -35,7 +37,7 @@ export interface ParsedQuery {
   filters: QueryFilters;
 }
 
-const FILTER_KEYS = new Set(["project", "before", "after", "tool", "branch", "role", "source", "session"]);
+const FILTER_KEYS = new Set(["project", "before", "after", "tool", "branch", "role", "source", "session", "host"]);
 const MAX_GROUPS = 16;
 /** Same characters FTS5's unicode61 tokenizer keeps inside a token. */
 const TOKEN = /[\p{L}\p{N}\p{M}\p{Co}]+/gu;
@@ -126,6 +128,7 @@ function applyFilter(filters: QueryFilters, key: string, value: string): boolean
     case "tool":
     case "branch":
     case "session":
+    case "host":
       filters[key] = value;
       return true;
     case "before":

@@ -25,10 +25,10 @@ export interface RebuildStats {
   carriedSharedLines: number;
 }
 
-/** Every sessions column but sid (v3: index_rev, context_copied). */
+/** Every sessions column but sid (v3: index_rev, context_copied; v4: host and repository identity). */
 const SESSION_COLUMNS =
   "id, project, cwd, git_branch, source, is_subagent, parent_session, title, first_prompt, start_time, end_time, message_count, legacy, " +
-  "index_rev, context_copied";
+  "index_rev, context_copied, host, git_remote, repo, repo_root, cwd_git";
 
 function carryArchive(fresh: DB, oldPath: string): { sessions: number; messages: number; sharedLines: number } {
   fresh.prepare("ATTACH DATABASE ? AS old").run(oldPath);

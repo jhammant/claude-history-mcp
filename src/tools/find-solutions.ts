@@ -28,6 +28,7 @@ export function handleFindSolutions(
   const query = args.technology ? `${args.technology} ${problem}` : problem;
   const response = engine.search(query, { limit: 30, includeContext: true, currentProject: context.currentProject });
 
+  const showHost = response.showHost;
   const ranked = response.hits
     .map((hit) => ({ hit, score: hit.score * (looksSolved(db, hit) ? 1.5 : 1) * (hit.partial ? 0.5 : 1) }))
     .sort((a, b) => b.score - a.score)
@@ -42,7 +43,7 @@ export function handleFindSolutions(
   const lines = [`${ranked.length} past conversation(s) about "${problem}", likeliest fixes first:`];
   if (context.freshness) lines.push(context.freshness);
   lines.push("");
-  ranked.forEach((hit, i) => lines.push(...formatHit(hit, i + 1)));
+  ranked.forEach((hit, i) => lines.push(...formatHit(hit, i + 1, showHost)));
   if (known.length) {
     lines.push("", "Extracted fixes:");
     for (const k of known) lines.push(`- [${k.type}] ${k.summary} (${projectName(k.project)}, session ${k.sessionId})`);

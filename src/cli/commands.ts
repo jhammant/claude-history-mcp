@@ -173,10 +173,16 @@ function runStatus(args: ParsedArgs): number {
       console.log(JSON.stringify(status));
       return 0;
     }
+    const hostRows = db.prepare("SELECT host, count(*) AS n FROM sessions GROUP BY host ORDER BY n DESC, host").all() as
+      Array<{ host: string; n: number }>;
+    const hostsLine = hostRows.some((r) => r.host !== "")
+      ? [`Hosts: ${hostRows.map((r) => (r.host ? `${r.host} (${n(r.n)} sessions)` : `unknown (${n(r.n)})`)).join(", ")}`]
+      : [];
     console.log(
       [
         `Database: ${status.database} (${bytes(status.bytes)})`,
         `Sessions: ${n(status.sessions)} (${SOURCES.map((s) => `${n(sessionsOf(status.sessionsBySource, s))} ${SOURCE_LABELS[s]}`).join(", ")}, ${n(status.subagentSessions)} subagent runs, ${n(status.archivedSessions)} archived from the old index)`,
+        ...hostsLine,
         `Messages: ${n(status.messages)}, oldest ${formatDateTime(status.oldestMessage)}, newest ${formatDateTime(status.newestMessage)}`,
         `Files behind: ${n(status.filesBehind)} of ${n(status.transcripts)} transcripts changed since they were indexed`,
         `Last sweep: ${lastSweep ? `${formatDateTime(lastSweep)}${status.lastSweepMs !== null ? ` (took ${(status.lastSweepMs / 1000).toFixed(1)} s)` : ""}` : "never"}`,

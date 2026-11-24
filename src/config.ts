@@ -1,4 +1,4 @@
-import { homedir } from "os";
+import { homedir, hostname } from "os";
 import { join } from "path";
 
 /**
@@ -14,10 +14,21 @@ import { join } from "path";
  *   CLAUDE_HISTORY_PI_SESSIONS_DIR  native pi sessions (default ~/.pi/agent/sessions)
  *   CODEX_HOME                   Codex home (default ~/.codex)
  *   CLAUDE_HISTORY_TOPUP_MS      query-time indexing budget in ms (default 300, 0 = off)
+ *   CLAUDE_HISTORY_HOST          name of this machine on every session it indexes (default: the hostname up to its first dot)
+ *   CLAUDE_HISTORY_REPO_MAP_DIR  directory-to-repository maps recorded per machine (default <data dir>/repo-map)
+ *   CLAUDE_HISTORY_REPO_HOST_ALIASES  git host aliases, a=b,c=d (alias host a is the same as b)
+ *   CLAUDE_HISTORY_WORKTREE_DIRS  comma-separated folder names that hold a repository's worktrees
+ *                                (default .worktrees,worktrees; set but empty = none)
  */
 function env(name: string): string | undefined {
   const value = process.env[name];
   return value && value.trim() ? value : undefined;
+}
+
+/** A host name safe to store, show and use as a file name: [A-Za-z0-9._-], no leading . or -, at most 64 characters. */
+export function cleanHostName(raw: string): string {
+  const cleaned = raw.replace(/[^A-Za-z0-9._-]/g, "_").replace(/^[.-]/, "_").slice(0, 64);
+  return cleaned || "localhost";
 }
 
 export const CONFIG = {
@@ -44,6 +55,22 @@ export const CONFIG = {
 
   get dataDir(): string {
     return env("CLAUDE_HISTORY_DATA_DIR") ?? join(homedir(), ".claude-history-mcp");
+  },
+  /** This machine's name, recorded on each session when it is first indexed. */
+  get host(): string {
+    return cleanHostName(env("CLAUDE_HISTORY_HOST") ?? hostname().split(".")[0]);
+  },
+  get repoMapDir(): string {
+    return env("CLAUDE_HISTORY_REPO_MAP_DIR") ?? join(this.dataDir, "repo-map");
+  },
+  get repoHostAliases(): string | undefined {
+    return env("CLAUDE_HISTORY_REPO_HOST_ALIASES");
+  },
+  /** Folder names directly under a repository that hold its worktrees. */
+  get worktreeDirs(): string[] {
+    const raw = process.env.CLAUDE_HISTORY_WORKTREE_DIRS;
+    if (raw === undefined) return [".worktrees", "worktrees"];
+    return raw.split(",").map((d) => d.trim()).filter((d) => d && !d.includes("/") && d !== "." && d !== "..");
   },
   get databaseFile(): string {
     return join(this.dataDir, "history.db");

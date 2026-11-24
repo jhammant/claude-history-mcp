@@ -17,6 +17,7 @@
  */
 
 import { CONFIG } from "../config.js";
+import { hostCount } from "./format.js";
 import type { DB } from "../db/database.js";
 import {
   looseGroups,
@@ -61,6 +62,8 @@ export interface SearchHit {
   parentSession: string | null;
   legacy: boolean;
   title: string | null;
+  /** Machine the session came from; "" when unknown. */
+  host: string;
   /** Text around the matched words, matches wrapped in ** **. */
   snippet: string;
   /** Where the snippet came from. */
@@ -81,6 +84,8 @@ export interface SearchResponse {
   candidates: number;
   capped: boolean;
   empty: boolean;
+  /** True when sessions from more than one host exist, so result lines name theirs. */
+  showHost: boolean;
 }
 
 interface Candidate {
@@ -114,7 +119,7 @@ function inText(expr: string): string {
 }
 
 function hasSessionFilter(filters: QueryFilters): boolean {
-  return !!(filters.project || filters.branch || filters.source || filters.session) ||
+  return !!(filters.project || filters.branch || filters.source || filters.session || filters.host) ||
     filters.after !== undefined || filters.before !== undefined;
 }
 
@@ -136,6 +141,10 @@ function sessionClauses(filters: QueryFilters, params: Record<string, unknown>, 
   if (filters.source) {
     params.source = filters.source;
     clauses.push("s.source = @source");
+  }
+  if (filters.host) {
+    params.host = filters.host.toLowerCase() === "unknown" ? "" : filters.host;
+    clauses.push("s.host = @host COLLATE NOCASE");
   }
   if (filters.session) {
     params.session = `${likeEscape(filters.session)}%`;
@@ -335,14 +344,14 @@ export class SearchEngine {
         this.db
           .prepare(
             `SELECT m.id, m.session_sid AS sid, m.seq, m.role, m.ts, m.tools, s.id AS session_id, s.project, s.cwd,
-               s.git_branch, s.source, s.is_subagent, s.parent_session, s.legacy, s.title
+               s.git_branch, s.source, s.is_subagent, s.parent_session, s.legacy, s.title, s.host
              FROM messages m JOIN sessions s ON s.sid = m.session_sid
              WHERE m.id IN (SELECT value FROM json_each(?))`
           )
           .all(JSON.stringify(ids)) as Array<{
           id: number; sid: number; seq: number; role: string; ts: number | null; tools: string; session_id: string;
           project: string; cwd: string | null; git_branch: string | null; source: string; is_subagent: number;
-          parent_session: string | null; legacy: number; title: string | null;
+          parent_session: string | null; legacy: number; title: string | null; host: string;
         }>
       ).map((row) => [row.id, row])
     );
@@ -371,6 +380,7 @@ export class SearchEngine {
         parentSession: row.parent_session,
         legacy: row.legacy === 1,
         title: row.title,
+        host: row.host,
         snippet: snip.text.replace(/\s+/g, " ").replaceAll(OPEN, "**").replaceAll(CLOSE, "**").trim(),
         field: snip.field,
         otherHits: group.count - 1,
@@ -395,11 +405,11 @@ export class SearchEngine {
     const hasFilters = Object.values(query.filters).some((v) => v !== undefined);
 
     if (query.groups.length === 0 && !hasFilters) {
-      return { query, hits: [], candidates: 0, capped: false, empty: true };
+      return { query, hits: [], candidates: 0, capped: false, empty: true, showHost: false };
     }
 
     const scope = this.scopeFilters(query.filters);
-    if (scope.none) return { query, hits: [], candidates: 0, capped: false, empty: false };
+    if (scope.none) return { query, hits: [], candidates: 0, capped: false, empty: false, showHost: false };
     // Candidates are found with the scope filters inside the MATCH; snippets only need the
     // text terms (FTS5 re-evaluates the whole expression for each snippet row).
     const textOnly = (expr: string | null) => (expr ? inText(expr) : null);
@@ -428,6 +438,6 @@ export class SearchEngine {
       }
     }
 
-    return { query, hits: this.hydrate(picked, includeContext), candidates, capped, empty: false };
+    return { query, hits: this.hydrate(picked, includeContext), candidates, capped, empty: false, showHost: hostCount(this.db) > 1 };
   }
 }

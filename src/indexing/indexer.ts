@@ -45,6 +45,8 @@ export interface IndexFileOptions {
   /** Stop after the batch in progress once Date.now() passes this. */
   deadline?: number;
   batchBytes?: number;
+  /** Machine name recorded on a session when it is created (default CONFIG.host). */
+  host?: string;
   /** Test hook: runs after a batch is parsed, before its transaction starts. */
   beforeCommit?: () => void;
 }
@@ -368,8 +370,8 @@ function prepare(db: DB) {
        WHERE session_sid = ? AND path <> ?`
     ),
     insertSession: db.prepare(
-      `INSERT INTO sessions(id, project, source, is_subagent, parent_session, title)
-       VALUES (@id, @project, @source, @isSubagent, @parent, @title) ON CONFLICT(id) DO NOTHING`
+      `INSERT INTO sessions(id, project, source, is_subagent, parent_session, title, host)
+       VALUES (@id, @project, @source, @isSubagent, @parent, @title, @host) ON CONFLICT(id) DO NOTHING`
     ),
     setProject: db.prepare("UPDATE sessions SET project = ? WHERE sid = ? AND project = ?"),
     maxSeq: db.prepare("SELECT max(seq) AS seq FROM messages WHERE session_sid = ?"),
@@ -405,6 +407,8 @@ function prepare(db: DB) {
                  WHEN cwd IS NULL AND @copiedCwd IS NOT NULL THEN 1 ELSE context_copied & 1 END) |
            (CASE WHEN @branch IS NOT NULL AND (git_branch IS NULL OR context_copied & 2) THEN 0
                  WHEN git_branch IS NULL AND @copiedBranch IS NOT NULL THEN 2 ELSE context_copied & 2 END),
+         -- A session keeps the host it was first indexed from; only an unknown one is filled.
+         host = CASE WHEN host = '' THEN @host ELSE host END,
          first_prompt = coalesce(first_prompt, @firstPrompt),
          title = coalesce(@customTitle, title, @aiTitle),
          index_rev = index_rev + 1
@@ -448,7 +452,7 @@ type SessionInfo = {
   sid: number; legacy: number; first_prompt: string | null; cwd: string | null; project: string; index_rev: number; context_copied: number;
 };
 
-function ensureSession(db: DB, s: Statements, file: TranscriptFile): SessionInfo {
+function ensureSession(db: DB, s: Statements, file: TranscriptFile, host: string): SessionInfo {
   const existing = s.session.get(file.sessionId) as SessionInfo | undefined;
   if (existing) return existing;
   db.transaction(() => {
@@ -459,6 +463,7 @@ function ensureSession(db: DB, s: Statements, file: TranscriptFile): SessionInfo
       isSubagent: file.isSubagent ? 1 : 0,
       parent: file.parentSessionId ?? null,
       title: file.isSubagent ? subagentTitle(file) : null,
+      host,
     });
   }).immediate();
   return s.session.get(file.sessionId) as SessionInfo;
@@ -470,6 +475,7 @@ const loggedClaimed = new Set<string>();
 export function indexFile(db: DB, file: TranscriptFile, options: IndexFileOptions = {}): IndexFileResult {
   const s = statements(db);
   const batchBytes = options.batchBytes ?? DEFAULT_BATCH_BYTES;
+  const host = options.host ?? CONFIG.host;
   const result: IndexFileResult = {
     status: "unchanged", reset: false, messagesAdded: 0, bytesRead: 0, complete: true, duplicates: noDuplicates(),
   };
@@ -489,7 +495,7 @@ export function indexFile(db: DB, file: TranscriptFile, options: IndexFileOption
       }
       return result;
     }
-    let session = ensureSession(db, s, file);
+    let session = ensureSession(db, s, file, host);
     result.sessionSid = session.sid;
     let row = s.file.get(file.path) as FileRow | undefined;
     const keyed = format.uuidLines === true;
@@ -657,7 +663,7 @@ export function indexFile(db: DB, file: TranscriptFile, options: IndexFileOption
             }
             r.dirty = false;
           }
-          s.updateSession.run({ ...update, added, sid: session.sid });
+          s.updateSession.run({ ...update, added, host, sid: session.sid });
           const tail = builder.pending;
           const tailState = {
             tailRowid: tail?.rowid ?? null, tailMsgId: tail?.msgId ?? null, pendingTools: serializePendingTools(builder.calls),
