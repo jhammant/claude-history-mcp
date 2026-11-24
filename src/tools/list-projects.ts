@@ -18,8 +18,9 @@ const MAX_LIMIT = 200;
 
 /**
  * Projects with history, newest first by default. Capped, because a long-lived database
- * holds hundreds of projects and the caller is a model with a context budget. Sessions with
- * no messages (empty Codex guardian-review threads) are left out of the rows and their counts.
+ * holds hundreds of projects and the caller is a model with a context budget. Codex and pi
+ * sessions with no messages (empty Codex guardian-review threads) are left out of the rows
+ * and their counts; every Claude session is counted, as before.
  */
 export function handleListProjects(db: DB, args: { sort_by?: string; limit?: number; query?: string }): string {
   const all = db
@@ -27,13 +28,13 @@ export function handleListProjects(db: DB, args: { sort_by?: string; limit?: num
       `SELECT project, max(cwd) AS cwd,
          sum(is_subagent = 0) AS sessions, sum(is_subagent) AS subagents,
          sum(message_count) AS messages, min(start_time) AS first, max(end_time) AS last
-       FROM sessions WHERE message_count > 0 GROUP BY project`
+       FROM sessions WHERE source = 'claude' OR message_count > 0 GROUP BY project`
     )
     .all() as ProjectRow[];
-  // Per source: top-level sessions with at least one message, so the breakdown matches the headline's scope.
+  // Per source: top-level sessions (Codex and pi ones with at least one message), so the breakdown matches the headline's scope.
   const sourceRows = db
     .prepare(
-      `SELECT project, source, count(*) AS n FROM sessions WHERE message_count > 0 AND is_subagent = 0
+      `SELECT project, source, count(*) AS n FROM sessions WHERE (source = 'claude' OR message_count > 0) AND is_subagent = 0
        GROUP BY project, source`
     )
     .all() as Array<{ project: string; source: string; n: number }>;

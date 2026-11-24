@@ -50,7 +50,7 @@ describe('list_projects', () => {
     expect(text).toBe('No projects match "nope" (35 projects have history).');
   });
 
-  it('leaves out sessions with no messages (Codex guardian-review threads): no unknown row, no count', () => {
+  it('leaves out Codex sessions with no messages (guardian-review threads): no unknown row, no count', () => {
     const u = '0199abcd-0000-7000-8000-000000000001';
     corpus.write(corpus.rolloutPath('2026-10-01', u), [
       rolloutMeta(u, { threadSource: 'guardian_review', parentThreadId: '0199abcd-0000-7000-8000-000000000000' }),
@@ -64,6 +64,19 @@ describe('list_projects', () => {
     const text = handleListProjects(db, { limit: 200 });
     expect(text).toContain('35 projects with conversation history:');
     expect(text).not.toMatch(/unknown/i);
-    expect(handleListProjects(db, { query: 'billing' })).toContain('- /work/billing — 1 sessions, 2 messages');
+    // A Claude session with no messages is counted, as it always was.
+    expect(handleListProjects(db, { query: 'billing' })).toContain('- /work/billing — 2 sessions, 2 messages');
+  });
+
+  it('still lists a project whose only Claude session has no messages', () => {
+    corpus.write(corpus.sessionPath('-work-quiet', 'quiet-1'), [userLine('', { cwd: '/work/quiet', sessionId: 'quiet-1', isMeta: true })]);
+    sweep(corpus.open());
+    const db = corpus.open();
+    expect(db.prepare("SELECT message_count FROM sessions WHERE id = 'quiet-1'").pluck().get()).toBe(0);
+
+    const text = handleListProjects(db, { limit: 200 });
+
+    expect(text).toContain('36 projects with conversation history:');
+    expect(text).toMatch(/- \S*quiet — 1 sessions, 0 messages/);
   });
 });

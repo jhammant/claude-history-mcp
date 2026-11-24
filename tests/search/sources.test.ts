@@ -75,13 +75,27 @@ describe('three sources', () => {
     expect(out).toMatch(/1 Claude, 1 Codex, 1 pi/);
   });
 
-  it('status --json carries sessionsBySource', async () => {
+  it('status --json carries sessionsBySource, a matching total and the old codexSessions', async () => {
     const log = vi.spyOn(console, 'log').mockImplementation(() => {});
     expect(await runCommand('status', ['--json'])).toBe(0);
     const status = JSON.parse(log.mock.calls[0][0] as string);
     expect(status.sessionsBySource).toEqual([
       { source: 'claude', sessions: 1 }, { source: 'codex', sessions: 1 }, { source: 'pi', sessions: 1 },
     ]);
-    expect(status).not.toHaveProperty('codexSessions');
+    // The headline total is the sum of the breakdown; codexSessions keeps its old meaning (every Codex session, empty ones too).
+    expect(status.sessions).toBe(3);
+    expect(status.codexSessions).toBe(2);
+  });
+
+  it('status counts a Claude session with no messages, and the total still equals the breakdown', async () => {
+    corpus.write(corpus.sessionPath('-work-quiet', 'quiet-1'), [userLine('', { cwd: '/work/quiet', sessionId: 'quiet-1', isMeta: true })]);
+    sweep(corpus.open());
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    expect(await runCommand('status', ['--json'])).toBe(0);
+    const status = JSON.parse(log.mock.calls[0][0] as string);
+    expect(status.sessionsBySource).toEqual([
+      { source: 'claude', sessions: 2 }, { source: 'codex', sessions: 1 }, { source: 'pi', sessions: 1 },
+    ]);
+    expect(status.sessions).toBe(4);
   });
 });

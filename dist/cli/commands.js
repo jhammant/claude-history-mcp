@@ -119,12 +119,13 @@ function runStatus(args) {
     }
     try {
         const counts = db
-            .prepare(`SELECT count(*) AS sessions, sum(is_subagent) AS subagents, sum(legacy) AS legacy
+            .prepare(`SELECT count(*) AS sessions, sum(source = 'codex') AS codex, sum(is_subagent) AS subagents, sum(legacy) AS legacy
          FROM sessions`)
             .get();
-        // Per source, leaving out sessions with no messages (Codex guardian-review threads). Unlike list_projects,
-        // these counts include subagent runs.
-        const sourceRows = db.prepare("SELECT source, count(*) AS n FROM sessions WHERE message_count > 0 GROUP BY source").all();
+        // Per source, leaving out Codex and pi sessions with no messages (Codex guardian-review threads); every Claude
+        // session counts. Unlike list_projects, these counts include subagent runs. The headline total is the sum of
+        // them, so the two always add up.
+        const sourceRows = db.prepare("SELECT source, count(*) AS n FROM sessions WHERE source = 'claude' OR message_count > 0 GROUP BY source").all();
         const sessionsBySource = SOURCES.map((source) => ({ source, sessions: sourceRows.find((r) => r.source === source)?.n ?? 0 }));
         const messages = db.prepare("SELECT count(*) AS messages, min(ts) AS oldest, max(ts) AS newest FROM messages").get();
         const { all, changed } = changedTranscripts(db);
@@ -142,8 +143,10 @@ function runStatus(args) {
         const status = {
             database: CONFIG.databaseFile,
             bytes: size,
-            sessions: counts.sessions,
+            sessions: sessionsBySource.reduce((total, c) => total + c.sessions, 0),
             sessionsBySource,
+            // As before: every Codex session, empty ones included (kept for scripts reading the old field).
+            codexSessions: counts.codex ?? 0,
             subagentSessions: counts.subagents ?? 0,
             archivedSessions: counts.legacy ?? 0,
             messages: messages.messages,
