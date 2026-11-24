@@ -87,6 +87,22 @@ describe('three sources', () => {
     expect(status.codexSessions).toBe(2);
   });
 
+  it('status counts hosts over the same sessions as the Sessions line, worded alike', async () => {
+    corpus.write(corpus.subagentPath('-work-app', 'claude-1', 'a1'), [userLine('sub gizmo', { cwd: '/work/app', isSidechain: true })]);
+    sweep(corpus.open());
+    const db = corpus.open();
+    db.prepare("UPDATE sessions SET host = 'laptop'").run();
+    db.prepare("UPDATE sessions SET host = '' WHERE source = 'pi'").run();
+    db.close();
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    expect(await runCommand('status', [])).toBe(0);
+    const out = log.mock.calls.map((c) => String(c[0])).join('\n');
+    const total = Number(/^Sessions: (\d+)/m.exec(out)?.[1]);
+    const hosts = /^Hosts: (.*)$/m.exec(out)?.[1] ?? '';
+    // the empty Codex thread is left out of both lines
+    expect(hosts).toBe(`laptop (${total - 1} sessions), unknown (1 sessions)`);
+  });
+
   it('status counts a Claude session with no messages, and the total still equals the breakdown', async () => {
     corpus.write(corpus.sessionPath('-work-quiet', 'quiet-1'), [userLine('', { cwd: '/work/quiet', sessionId: 'quiet-1', isMeta: true })]);
     sweep(corpus.open());

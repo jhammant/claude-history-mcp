@@ -136,9 +136,9 @@ function runStatus(args: ParsedArgs): number {
     // Per source, leaving out Codex and pi sessions with no messages (Codex guardian-review threads); every Claude
     // session counts. Unlike list_projects, these counts include subagent runs. The headline total is the sum of
     // them, so the two always add up.
-    const sourceRows = db.prepare(
-      "SELECT source, count(*) AS n FROM sessions WHERE source = 'claude' OR message_count > 0 GROUP BY source"
-    ).all() as Array<{ source: string; n: number }>;
+    const counted = "source = 'claude' OR message_count > 0";
+    const sourceRows = db.prepare(`SELECT source, count(*) AS n FROM sessions WHERE ${counted} GROUP BY source`).all() as
+      Array<{ source: string; n: number }>;
     const sessionsBySource = SOURCES.map((source) => ({ source, sessions: sourceRows.find((r) => r.source === source)?.n ?? 0 }));
     const messages = db.prepare("SELECT count(*) AS messages, min(ts) AS oldest, max(ts) AS newest FROM messages").get() as
       { messages: number; oldest: number | null; newest: number | null };
@@ -175,10 +175,12 @@ function runStatus(args: ParsedArgs): number {
       console.log(JSON.stringify(status));
       return 0;
     }
-    const hostRows = db.prepare("SELECT host, count(*) AS n FROM sessions GROUP BY host ORDER BY n DESC, host").all() as
-      Array<{ host: string; n: number }>;
+    // The same sessions as the Sessions line (empty Codex and pi threads left out), so the two add up.
+    const hostRows = db.prepare(
+      `SELECT host, count(*) AS n FROM sessions WHERE ${counted} GROUP BY host ORDER BY n DESC, host`
+    ).all() as Array<{ host: string; n: number }>;
     const hostsLine = hostRows.some((r) => r.host !== "")
-      ? [`Hosts: ${hostRows.map((r) => (r.host ? `${r.host} (${n(r.n)} sessions)` : `unknown (${n(r.n)})`)).join(", ")}`]
+      ? [`Hosts: ${hostRows.map((r) => `${r.host || "unknown"} (${n(r.n)} sessions)`).join(", ")}`]
       : [];
     console.log(
       [
