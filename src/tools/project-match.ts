@@ -1,5 +1,5 @@
 import type { DB } from "../db/database.js";
-import { repoName } from "../repos/resolve.js";
+import { isPathKey, repoName } from "../repos/resolve.js";
 import { encodeProjectPath } from "../utils/path-encoder.js";
 
 function likeEscape(value: string): string {
@@ -35,20 +35,26 @@ const trimRoot = (p: string): string => p.replace(/\/+$/, "");
  * and still matches directly. A session does not anchor when all of these hold:
  *   1. it has a working directory;
  *   2. its own repository root does not match the filter;
- *   3. another repository on the same machine has a root that matches the filter, and the
- *      working directory is that root or beneath it (segment-aware).
- * A root matches the filter when it, or its encoded form (-home-me-dev-app), contains the
- * filter text, case-insensitively. So a worktree of one repository inside another's tree
+ *   3. another repository on the same machine, known by a remote, has a root that matches
+ *      the filter, and the working directory is that root or beneath it (segment-aware).
+ * A repository known only by its path (a plain folder) never contains another, so a
+ * symlinked repository under a parent folder still anchors. The cost: a worktree nested in a
+ * repository with no remote still expands.
+ * A root matches the filter when it, or its encoded form (-home-me-dev-app, with '/' or any
+ * character outside [A-Za-z0-9] as '-'), contains the filter text, case-insensitively. So a worktree of one repository inside another's tree
  * does not drag in the first repository, while a symlinked path, or a folder holding several
  * repositories, still reaches every repository it names.
  */
 function anchoredRepos(db: DB, filter: string, direct: Placed[]): string[] {
   const f = trimRoot(filter.trim()).toLowerCase();
-  const matches = (root: string): boolean => root.toLowerCase().includes(f) || encodeProjectPath(root).toLowerCase().includes(f);
+  const matches = (root: string): boolean =>
+    root.toLowerCase().includes(f) ||
+    encodeProjectPath(root).toLowerCase().includes(f) ||
+    root.replace(/[^A-Za-z0-9]/g, "-").toLowerCase().includes(f);
   const triples = db
     .prepare("SELECT DISTINCT host, repo, repo_root FROM sessions WHERE repo IS NOT NULL AND repo_root IS NOT NULL")
     .all() as Array<{ host: string; repo: string; repo_root: string }>;
-  const matching = triples.filter((t) => matches(t.repo_root));
+  const matching = triples.filter((t) => matches(t.repo_root) && !isPathKey(t.host, t.repo, t.repo_root));
   const anchored = new Set<string>();
   for (const s of direct) {
     if (s.repo === null) continue;

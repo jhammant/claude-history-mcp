@@ -93,6 +93,11 @@ export function pathKey(host: string, path: string): string {
   return host === "" ? path : `${host}:${path}`;
 }
 
+/** True when `key` is the path key of a repository rooted at `root` on `host`, that is, one known by no remote. */
+export function isPathKey(host: string, key: string, root: string): boolean {
+  return key === pathKey(host, root);
+}
+
 /** The last path segment: a repository key's name, a directory's base name. */
 export function lastSegment(path: string): string {
   const parts = path.split(/[\\/]+/).filter(Boolean);

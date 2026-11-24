@@ -94,4 +94,27 @@ describe('filters that still expand', () => {
     expect(new SearchEngine(db).search('gearbox', { project: '/home/me/dev' }).hits.map((h) => h.sessionId).sort()).toEqual(['a', 'a-wt', 'folder', 'l']);
     expect(matchProjects(db, '/home/me/dev')).toContain('-w-app');
   });
+
+  it('a path-only parent folder does not stop a symlinked repository reaching its other directories', () => {
+    const db = build(corpus, [
+      { id: 'folder', project: '-home-me-dev', cwd: '/home/me/dev', repo: 'laptop:/home/me/dev', root: '/home/me/dev' },
+      { id: 'via-link', project: '-home-me-dev-app-link', cwd: '/home/me/dev/app-link', repo: APP, root: '/data/app' },
+      { id: 'real', project: '-data-app', cwd: '/data/app', repo: APP, root: '/data/app' },
+    ]);
+    for (const filter of ['/home/me/dev', 'dev']) {
+      expect(reposForProjectFilter(db, filter)).toContain(APP);
+      expect(matchProjects(db, filter)).toContain('-data-app');
+      expect(new SearchEngine(db).search('gearbox', { project: filter }).hits.map((h) => h.sessionId)).toContain('real');
+    }
+  });
+
+  it('an encoded filter matches a root containing dots or underscores', () => {
+    const db = build(corpus, [
+      { id: 'app-1', project: '-home-me-my-app', cwd: '/home/me/my.app', repo: APP, root: '/home/me/my.app' },
+      { id: 'lib-nested', project: '-home-me-my-app--claude-worktrees-lib-skin', cwd: '/home/me/my.app/.claude/worktrees/lib-skin', repo: LIB, root: '/x/Lib' },
+      { id: 'lib-main', project: '-x-Lib', cwd: '/x/Lib', repo: LIB, root: '/x/Lib' },
+    ]);
+    expect(reposForProjectFilter(db, '-home-me-my-app')).toEqual([APP]);
+    expect(matchProjects(db, '-home-me-my-app')).not.toContain('-x-Lib');
+  });
 });
