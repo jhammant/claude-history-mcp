@@ -71,7 +71,8 @@ function sweepLine(stats: SweepStats): string {
   return `${changed} in ${(stats.ms / 1000).toFixed(1)} s; ${n(stats.transcripts)} transcripts on disk, ` +
     `${n(stats.sessions)} sessions and ${n(stats.messages)} messages in the database (${bytes(stats.databaseBytes)})` +
     `${stats.summarized ? `; ${n(stats.summarized)} summaries refreshed` : ""}${stats.optimized ? "; search index optimised" : ""}` +
-    `${stats.vacuumed ? "; database compacted" : ""}.`;
+    `${stats.vacuumed ? "; database compacted" : ""}.` +
+    `${stats.repoError ? ` Repository attribution failed (will retry): ${stats.repoError}` : ""}`;
 }
 
 function runSweep(args: ParsedArgs): number {

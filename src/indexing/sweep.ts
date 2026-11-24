@@ -9,6 +9,9 @@ import { getMeta, isBusyError, setMeta, withBusyTimeout, type DB } from "../db/d
 import { extractKnowledge } from "../knowledge/knowledge-extractor.js";
 import { replaceSessionKnowledge } from "../knowledge/knowledge-store.js";
 import { loadParsedSession } from "../knowledge/parsed-session.js";
+import { loadRepoMaps } from "../repos/map.js";
+import { recordRepos } from "../repos/probe.js";
+import { REPO_NEW_DIR_KEY, repoResolvedStamp, resolveAllSessions } from "../repos/resolve.js";
 import { saveSummary, summarizeSession } from "../knowledge/session-summarizer.js";
 import { listSubagentFiles, listTranscripts, type TranscriptFile } from "../parsers/transcript-files.js";
 import { hasChanged, indexFile, noDuplicates, type DuplicateLines } from "./indexer.js";
@@ -104,6 +107,8 @@ export interface SweepStats {
   databaseBytes: number;
   /** Claude lines skipped because their uuid was already indexed, by class. */
   duplicates: DuplicateLines;
+  /** Set when the repository step failed; the rest of the sweep is unaffected. */
+  repoError?: string;
   ms: number;
 }
 
@@ -115,6 +120,8 @@ export interface SweepOptions {
    * passes the database it replaces, so a tie keeps its owner). See line-keys.ts.
    */
   lineHolder?: LineHolder;
+  /** Ask git about the working directories of the sessions indexed (default true; false for tests with no real repository). */
+  probeRepos?: boolean;
 }
 
 function databaseBytes(db: DB): number {
@@ -145,6 +152,39 @@ function refreshKnowledge(db: DB, sids: Iterable<number>): number {
     count++;
   }
   return count;
+}
+
+/** Distinct working directories of this host's sessions: the given ones, or all of them. */
+function hostDirs(db: DB, sids: Iterable<number> | null): string[] {
+  if (sids === null) {
+    return db.prepare("SELECT DISTINCT cwd FROM sessions WHERE host = ? AND cwd IS NOT NULL AND cwd <> ''").pluck().all(CONFIG.host) as string[];
+  }
+  const dirs = new Set<string>();
+  const one = db.prepare("SELECT cwd FROM sessions WHERE sid = ? AND host = ? AND cwd IS NOT NULL AND cwd <> ''").pluck();
+  for (const sid of sids) {
+    const cwd = one.get(sid, CONFIG.host) as string | undefined;
+    if (cwd) dirs.add(cwd);
+  }
+  return [...dirs];
+}
+
+/**
+ * Repository attribution: probe git for the directories (the map file is the single record, so a
+ * rebuild keeps worktrees deleted since), load the files, and run the full pass when the map,
+ * the resolver stamp or the new-directory flag says it is due. New sessions are resolved as
+ * their files are indexed; an idle sweep costs a read of the map file and two meta reads.
+ */
+function resolveRepositories(db: DB, indexed: Set<number>, probe: boolean): void {
+  const stampChanged = getMeta(db, "repo_resolved") !== repoResolvedStamp();
+  if (probe) recordRepos(hostDirs(db, stampChanged ? null : indexed), { mapDir: CONFIG.repoMapDir, host: CONFIG.host });
+  const maps = loadRepoMaps(db, CONFIG.repoMapDir, CONFIG.host);
+  if (maps.changed || stampChanged || getMeta(db, REPO_NEW_DIR_KEY) !== undefined) {
+    db.transaction(() => {
+      resolveAllSessions(db);
+      setMeta(db, "repo_resolved", repoResolvedStamp());
+      db.prepare("DELETE FROM meta WHERE key = ?").run(REPO_NEW_DIR_KEY);
+    }).immediate();
+  }
 }
 
 /** Count new messages towards the next VACUUM. */
@@ -187,6 +227,7 @@ export function sweep(db: DB, options: SweepOptions = {}): SweepStats {
       duplicates: noDuplicates(),
     };
     const touched = new Set<number>();
+    const indexedSids = new Set<number>();
     let lastReport = Date.now();
     // Claude files in a fixed order (line-keys.ts, indexingOrder): the session that existed first
     // keeps the lines a later fork copied, in every sweep and in a rebuild alike, unless the fork
@@ -207,6 +248,7 @@ export function sweep(db: DB, options: SweepOptions = {}): SweepStats {
       if (result.reset) stats.reset++;
       stats.messagesAdded += result.messagesAdded;
       stats.bytesRead += result.bytesRead;
+      if (result.sessionSid !== undefined) indexedSids.add(result.sessionSid);
       if (result.sessionSid !== undefined && (result.messagesAdded > 0 || result.reset)) touched.add(result.sessionSid);
       // A session read again from scratch: its other files (a twin under another project path)
       // were set back to their start, so they are read in this sweep too, not the next.
@@ -226,6 +268,12 @@ export function sweep(db: DB, options: SweepOptions = {}): SweepStats {
     }
 
     stats.summarized = refreshKnowledge(db, touched);
+    // A repository failure never fails the sweep; the stamp or flag stays, so the next sweep retries.
+    try {
+      resolveRepositories(db, indexedSids, options.probeRepos !== false);
+    } catch (error) {
+      stats.repoError = error instanceof Error ? error.message : String(error);
+    }
 
     const sinceOptimize = Number(getMeta(db, "messages_since_optimize") ?? 0) + stats.messagesAdded;
     if (sinceOptimize >= OPTIMIZE_AFTER_MESSAGES) {

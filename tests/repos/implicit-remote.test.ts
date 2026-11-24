@@ -2,9 +2,10 @@ import { mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { getMeta, openDatabase, type DB } from '../../src/db/database.js';
+import { openDatabase, type DB } from '../../src/db/database.js';
 import { sweep } from '../../src/indexing/sweep.js';
-import { REPO_NEW_DIR_KEY, repoResolver, resolveAllSessions } from '../../src/repos/resolve.js';
+import { repoResolver, resolveAllSessions } from '../../src/repos/resolve.js';
+import { useHost } from '../helpers/host.js';
 import { createCorpus, piSession, piUser, rolloutMessage, rolloutMeta, rolloutTurn, userLine, type Corpus } from '../helpers/corpus.js';
 
 const U1 = '0199eeee-0000-7000-8000-000000000001';
@@ -13,16 +14,7 @@ const P1 = '0199eeee-0000-7000-8000-0000000000a1';
 const REMOTE = 'https://example.com/acme/app.git';
 const KEY = 'example.com/acme/app';
 
-/**
- * A sweep, then the full pass the sweep runs when indexing flagged a new directory (the
- * flag is what this file tests; the sweep itself runs the pass from a later change).
- */
-function sweepAndResolve(db: DB): void {
-  sweep(db);
-  if (getMeta(db, REPO_NEW_DIR_KEY) === undefined) return;
-  resolveAllSessions(db);
-  db.prepare('DELETE FROM meta WHERE key = ?').run(REPO_NEW_DIR_KEY);
-}
+const NO_GIT = { probeRepos: false };
 
 /**
  * A session with git_remote and cwd_git = 1 is an implicit map row for its own cwd: other
@@ -30,17 +22,9 @@ function sweepAndResolve(db: DB): void {
  */
 describe('implicit map rows from a session remote at its own cwd', () => {
   let corpus: Corpus;
-  let savedHost: string | undefined;
-  beforeEach(() => {
-    savedHost = process.env.CLAUDE_HISTORY_HOST;
-    process.env.CLAUDE_HISTORY_HOST = 'laptop';
-    corpus = createCorpus();
-  });
-  afterEach(() => {
-    corpus.cleanup();
-    if (savedHost === undefined) delete process.env.CLAUDE_HISTORY_HOST;
-    else process.env.CLAUDE_HISTORY_HOST = savedHost;
-  });
+  useHost();
+  beforeEach(() => { corpus = createCorpus(); });
+  afterEach(() => corpus.cleanup());
 
   const repo = (id: string) => corpus.open().prepare('SELECT repo, repo_root FROM sessions WHERE id = ?').get(id);
   const claude = (project: string, id: string, cwd: string) =>
@@ -51,10 +35,10 @@ describe('implicit map rows from a session remote at its own cwd', () => {
 
   it('joins a Claude session indexed before the Codex session at the same cwd', () => {
     claude('-w-app', 'c1', '/w/app');
-    sweepAndResolve(corpus.open());
+    sweep(corpus.open(), NO_GIT);
     expect(repo('c1')).toEqual({ repo: 'laptop:/w/app', repo_root: '/w/app' });
     codex(U1, '/w/app');
-    sweepAndResolve(corpus.open());
+    sweep(corpus.open(), NO_GIT);
     expect(repo('c1')).toEqual({ repo: KEY, repo_root: '/w/app' });
     expect(repo(`codex-${U1}`)).toEqual({ repo: KEY, repo_root: '/w/app' });
     expect(repoCount()).toBe(1);
@@ -62,9 +46,9 @@ describe('implicit map rows from a session remote at its own cwd', () => {
 
   it('joins a Claude session indexed after the Codex session at the same cwd', () => {
     codex(U1, '/w/app');
-    sweepAndResolve(corpus.open());
+    sweep(corpus.open(), NO_GIT);
     claude('-w-app', 'c1', '/w/app');
-    sweepAndResolve(corpus.open());
+    sweep(corpus.open(), NO_GIT);
     expect(repo('c1')).toEqual({ repo: KEY, repo_root: '/w/app' });
     expect(repoCount()).toBe(1);
   });
@@ -72,7 +56,7 @@ describe('implicit map rows from a session remote at its own cwd', () => {
   it('joins both when they arrive in one sweep', () => {
     claude('-w-app', 'c1', '/w/app');
     codex(U1, '/w/app');
-    sweepAndResolve(corpus.open());
+    sweep(corpus.open(), NO_GIT);
     expect(repo('c1')).toMatchObject({ repo: KEY });
     expect(repoCount()).toBe(1);
   });
@@ -80,7 +64,7 @@ describe('implicit map rows from a session remote at its own cwd', () => {
   it('applies to the exact cwd only, never to a directory below it', () => {
     codex(U1, '/w/app');
     claude('-w-app-sub', 'sub', '/w/app/sub');
-    sweepAndResolve(corpus.open());
+    sweep(corpus.open(), NO_GIT);
     expect(repo('sub')).toEqual({ repo: 'laptop:/w/app/sub', repo_root: '/w/app/sub' });
   });
 
@@ -91,24 +75,24 @@ describe('implicit map rows from a session remote at its own cwd', () => {
       rolloutMessage('user', 'hello from the folder'),
     ]);
     claude('-w-folder', 'f1', '/w/folder');
-    sweepAndResolve(corpus.open());
+    sweep(corpus.open(), NO_GIT);
     expect(repo('f1')).toEqual({ repo: 'laptop:/w/folder', repo_root: '/w/folder' });
   });
 
   it('gives a pi session at the same cwd the remote', () => {
     codex(U1, '/w/app');
     corpus.write(corpus.piPath('--w-app--', P1), [piSession(P1, { cwd: '/w/app' }), piUser('hello pi')]);
-    sweepAndResolve(corpus.open());
+    sweep(corpus.open(), NO_GIT);
     const pi = corpus.open().prepare("SELECT repo FROM sessions WHERE source = 'pi'").pluck().get();
     expect(pi).toBe(KEY);
   });
 
   it('does not reach a session indexed from another host at the same cwd', () => {
     claude('-w-app', 'c1', '/w/app');
-    sweepAndResolve(corpus.open());
+    sweep(corpus.open(), NO_GIT);
     process.env.CLAUDE_HISTORY_HOST = 'desktop';
     codex(U1, '/w/app');
-    sweepAndResolve(corpus.open());
+    sweep(corpus.open(), NO_GIT);
     expect(repo(`codex-${U1}`)).toEqual({ repo: KEY, repo_root: '/w/app' });
     expect(repo('c1')).toEqual({ repo: 'laptop:/w/app', repo_root: '/w/app' });
   });

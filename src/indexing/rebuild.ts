@@ -11,6 +11,7 @@
 import { existsSync, rmSync } from "fs";
 import { openDatabase, type DB } from "../db/database.js";
 import { scopeOf } from "../db/schema.js";
+import { resolveAllSessions } from "../repos/resolve.js";
 import { acquireLock, releaseLock, sweep, SweepBusyError, type SweepStats } from "./sweep.js";
 
 export interface RebuildStats {
@@ -102,6 +103,9 @@ export async function rebuild(livePath: string, progress?: (line: string) => voi
       const lineHolder = held ? (key: Buffer) => held.get(key) as string | undefined : undefined;
       const stats = sweep(fresh, { progress, lineHolder });
       const carried = live ? carryArchive(fresh, livePath) : { sessions: 0, messages: 0, sharedLines: 0 };
+      // Carried sessions are repository evidence too (implicit map rows, cwd_git): resolve
+      // everything again with them present.
+      if (carried.sessions > 0) resolveAllSessions(fresh);
       fresh.pragma("wal_checkpoint(TRUNCATE)");
       progress?.("Swapping it in…");
       await fresh.backup(livePath);
