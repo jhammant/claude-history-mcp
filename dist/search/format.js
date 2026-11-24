@@ -30,10 +30,14 @@ export function tildePath(path, home = homedir()) {
 export function projectName(project, cwd) {
     return cwd ? tildePath(cwd) : extractProjectName(project);
 }
+/** Distinct hosts among the sessions; sessions with an unknown (empty) host do not count. */
+export function hostCount(db) {
+    return db.prepare("SELECT count(DISTINCT host) FROM sessions WHERE host <> ''").pluck().get();
+}
 function contextLine(label, m) {
     return m ? `   ${label} #${m.seq} ${m.role}: ${m.text}` : null;
 }
-export function formatHit(hit, index) {
+export function formatHit(hit, index, showHost = false) {
     const tags = [];
     if (hit.source !== "claude")
         tags.push(hit.source);
@@ -47,7 +51,7 @@ export function formatHit(hit, index) {
     const where = hit.field === "prose" ? "" : ` (in ${hit.field === "tool_input" ? "tool input" : "tool output"})`;
     const more = hit.otherHits > 0 ? ` · +${hit.otherHits} more hit${hit.otherHits === 1 ? "" : "s"} in session` : "";
     const lines = [
-        `${index}. ${projectName(hit.project, hit.cwd)} · ${formatDateTime(hit.ts)} · session ${hit.sessionId} · ${hit.role} #${hit.seq}${tools}${more}` +
+        `${index}. ${projectName(hit.project, hit.cwd)}${showHost ? ` @${hit.host || "unknown"}` : ""} · ${formatDateTime(hit.ts)} · session ${hit.sessionId} · ${hit.role} #${hit.seq}${tools}${more}` +
             (tags.length ? ` · ${tags.join(" · ")}` : ""),
     ];
     if (hit.title)
@@ -85,7 +89,7 @@ export function formatSearchResponse(response, rawQuery, freshness) {
         lines.push(freshness);
     lines.push("");
     response.hits.forEach((hit, i) => {
-        lines.push(...formatHit(hit, i + 1));
+        lines.push(...formatHit(hit, i + 1, response.showHost));
     });
     if (response.hits.length > 0) {
         lines.push("", "Open a hit with read_session(session_id, around=<#>).");

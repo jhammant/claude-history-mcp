@@ -40,6 +40,8 @@ export interface SweepStats {
     databaseBytes: number;
     /** Claude lines skipped because their uuid was already indexed, by class. */
     duplicates: DuplicateLines;
+    /** Set when the repository step failed; the rest of the sweep is unaffected. */
+    repoError?: string;
     ms: number;
 }
 export interface SweepOptions {
@@ -50,6 +52,8 @@ export interface SweepOptions {
      * passes the database it replaces, so a tie keeps its owner). See line-keys.ts.
      */
     lineHolder?: LineHolder;
+    /** Ask git about the working directories of the sessions indexed (default true; false for tests with no real repository). */
+    probeRepos?: boolean;
 }
 /** Count new messages towards the next VACUUM. */
 export declare function noteNewMessages(db: DB, added: number): void;

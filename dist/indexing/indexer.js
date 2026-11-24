@@ -28,6 +28,8 @@ import { scopeOf } from "../db/schema.js";
 import { extractContent, isLocalCommandEcho, truncate } from "../parsers/content-extractor.js";
 import { formatOf } from "../formats/registry.js";
 import { claudeProjectDir, UNKNOWN_PROJECT } from "../utils/path-encoder.js";
+import { implicitRepoKey, REPO_NEW_DIR_KEY, repoResolver } from "../repos/resolve.js";
+import { stripRemoteCredentials } from "../repos/url.js";
 import { lineKey } from "./line-keys.js";
 import { readLines } from "./line-reader.js";
 const HEAD_BYTES = 4096;
@@ -59,8 +61,8 @@ function serializePendingTools(pending) {
 }
 function emptyUpdate() {
     return {
-        minTs: null, maxTs: null, added: 0, cwd: null, branch: null, firstPrompt: null, aiTitle: null, customTitle: null,
-        copiedCwd: null, copiedBranch: null,
+        gitRemote: null, minTs: null, maxTs: null, added: 0, cwd: null, branch: null, firstPrompt: null, aiTitle: null, customTitle: null,
+        cwdGit: 0, copiedCwd: null, copiedBranch: null, copiedGitRemote: null, copiedCwdGit: 0,
     };
 }
 /** sessions.context_copied bits: the stored value came from copied lines, not the session's own. */
@@ -121,6 +123,12 @@ export class RowBuilder {
     calls;
     finished = [];
     update = emptyUpdate();
+    /**
+     * The session's own cwd: the stored one when the session has it, else the first cwd read. Git
+     * evidence counts for it only from a line at that cwd, since a session that started in a
+     * folder and moved into a repository records the folder as its cwd and the repository's branch.
+     */
+    sessionCwd = null;
     constructor(pending, nextSeq, hasFirstPrompt, calls) {
         this.pending = pending;
         this.nextSeq = nextSeq;
@@ -158,12 +166,30 @@ export class RowBuilder {
      */
     noteContext(obj) {
         // A cwd the format states for the whole session (a Codex fork's header) wins over the line's.
-        if (typeof obj.sessionCwd === "string" && obj.sessionCwd && !this.update.cwd)
-            this.update.cwd = obj.sessionCwd;
+        if (typeof obj.sessionCwd === "string" && obj.sessionCwd) {
+            if (!this.update.cwd)
+                this.update.cwd = obj.sessionCwd;
+            if (!this.sessionCwd)
+                this.sessionCwd = obj.sessionCwd;
+        }
         if (typeof obj.cwd === "string" && obj.cwd && !this.update.cwd)
             this.update.cwd = obj.cwd;
         if (typeof obj.gitBranch === "string" && obj.gitBranch && !this.update.branch)
             this.update.branch = obj.gitBranch;
+        if (typeof obj.gitRemote === "string" && obj.gitRemote && !this.update.gitRemote)
+            this.update.gitRemote = obj.gitRemote;
+        // A session-level remote on a line at another directory (the Codex header's, see
+        // codex-rollout.ts): the session's remote, but no evidence for this line's cwd.
+        if (typeof obj.sessionGitRemote === "string" && obj.sessionGitRemote && !this.update.gitRemote) {
+            this.update.gitRemote = obj.sessionGitRemote;
+        }
+        const lineCwd = typeof obj.cwd === "string" && obj.cwd ? obj.cwd : null;
+        if (lineCwd && !this.sessionCwd)
+            this.sessionCwd = lineCwd;
+        if (lineCwd && lineCwd === this.sessionCwd &&
+            ((typeof obj.gitBranch === "string" && obj.gitBranch) || (typeof obj.gitRemote === "string" && obj.gitRemote))) {
+            this.update.cwdGit = 1;
+        }
     }
     /**
      * Where a line skipped because another session holds it was written: a fallback for a fork
@@ -171,10 +197,17 @@ export class RowBuilder {
      */
     noteCopied(obj) {
         const u = this.update;
-        if (typeof obj.cwd === "string" && obj.cwd && !u.copiedCwd)
-            u.copiedCwd = obj.cwd;
+        const lineCwd = typeof obj.cwd === "string" && obj.cwd ? obj.cwd : null;
+        if (lineCwd && !u.copiedCwd)
+            u.copiedCwd = lineCwd;
         if (typeof obj.gitBranch === "string" && obj.gitBranch && !u.copiedBranch)
             u.copiedBranch = obj.gitBranch;
+        if (typeof obj.gitRemote === "string" && obj.gitRemote && !u.copiedGitRemote)
+            u.copiedGitRemote = obj.gitRemote;
+        if (lineCwd && lineCwd === u.copiedCwd &&
+            ((typeof obj.gitBranch === "string" && obj.gitBranch) || (typeof obj.gitRemote === "string" && obj.gitRemote))) {
+            u.copiedCwdGit = 1;
+        }
     }
     addLine(obj) {
         const type = obj.type;
@@ -280,8 +313,8 @@ function prepare(db) {
        WHERE session_sid = @sid AND path <> @path`),
         rereadOtherFiles: db.prepare(`UPDATE files SET size = 0, mtime = 0, offset = 0, head = '', tail_rowid = NULL, tail_msg_id = NULL, pending_tools = ''
        WHERE session_sid = ? AND path <> ?`),
-        insertSession: db.prepare(`INSERT INTO sessions(id, project, source, is_subagent, parent_session, title)
-       VALUES (@id, @project, @source, @isSubagent, @parent, @title) ON CONFLICT(id) DO NOTHING`),
+        insertSession: db.prepare(`INSERT INTO sessions(id, project, source, is_subagent, parent_session, title, host)
+       VALUES (@id, @project, @source, @isSubagent, @parent, @title, @host) ON CONFLICT(id) DO NOTHING`),
         setProject: db.prepare("UPDATE sessions SET project = ? WHERE sid = ? AND project = ?"),
         maxSeq: db.prepare("SELECT max(seq) AS seq FROM messages WHERE session_sid = ?"),
         tailRow: db.prepare(`SELECT m.id, m.seq, m.role, m.ts, m.tools, t.prose, t.tool_input, t.tool_output
@@ -296,17 +329,28 @@ function prepare(db) {
          end_time = CASE WHEN @maxTs IS NOT NULL AND (end_time IS NULL OR end_time < @maxTs) THEN @maxTs ELSE end_time END,
          message_count = message_count + @added,
          -- Set once, from the session's own lines. Values from copied lines (context_copied bits
-         -- 1 cwd, 2 branch) only fill a gap, and the session's own value replaces them.
+         -- 1 cwd, 2 branch, 4 remote) only fill a gap, and the session's own value replaces them.
          -- The SET expressions all read the row as it was before this update.
          cwd = CASE WHEN @cwd IS NOT NULL AND (cwd IS NULL OR context_copied & 1) THEN @cwd
                     WHEN cwd IS NULL THEN @copiedCwd ELSE cwd END,
          git_branch = CASE WHEN @branch IS NOT NULL AND (git_branch IS NULL OR context_copied & 2) THEN @branch
                            WHEN git_branch IS NULL THEN @copiedBranch ELSE git_branch END,
+         git_remote = CASE WHEN @gitRemote IS NOT NULL AND (git_remote IS NULL OR context_copied & 4) THEN @gitRemote
+                           WHEN git_remote IS NULL THEN @copiedGitRemote ELSE git_remote END,
+         -- Git evidence at whichever cwd is in use.
+         cwd_git = CASE WHEN @cwd IS NOT NULL AND (cwd IS NULL OR context_copied & 1) THEN @cwdGit
+                        WHEN cwd IS NULL AND @copiedCwd IS NOT NULL THEN @copiedCwdGit
+                        WHEN context_copied & 1 AND @copiedCwd = cwd THEN max(cwd_git, @copiedCwdGit)
+                        ELSE max(cwd_git, @cwdGit) END,
          context_copied =
            (CASE WHEN @cwd IS NOT NULL AND (cwd IS NULL OR context_copied & 1) THEN 0
                  WHEN cwd IS NULL AND @copiedCwd IS NOT NULL THEN 1 ELSE context_copied & 1 END) |
            (CASE WHEN @branch IS NOT NULL AND (git_branch IS NULL OR context_copied & 2) THEN 0
-                 WHEN git_branch IS NULL AND @copiedBranch IS NOT NULL THEN 2 ELSE context_copied & 2 END),
+                 WHEN git_branch IS NULL AND @copiedBranch IS NOT NULL THEN 2 ELSE context_copied & 2 END) |
+           (CASE WHEN @gitRemote IS NOT NULL AND (git_remote IS NULL OR context_copied & 4) THEN 0
+                 WHEN git_remote IS NULL AND @copiedGitRemote IS NOT NULL THEN 4 ELSE context_copied & 4 END),
+         -- A session keeps the host it was first indexed from; only an unknown one is filled.
+         host = CASE WHEN host = '' THEN @host ELSE host END,
          first_prompt = coalesce(first_prompt, @firstPrompt),
          title = coalesce(@customTitle, title, @aiTitle),
          index_rev = index_rev + 1
@@ -322,6 +366,12 @@ function prepare(db) {
         resetSession: db.prepare(`UPDATE sessions SET start_time = NULL, end_time = NULL, message_count = 0, first_prompt = NULL, legacy = 0,
          index_rev = index_rev + 1
        WHERE sid = ?`),
+        repoIdent: db.prepare("SELECT host, cwd, git_remote, cwd_git, repo FROM sessions WHERE sid = ?"),
+        gitCwdSeen: db.prepare("SELECT 1 FROM sessions WHERE host = ? AND cwd = ? AND sid != ? AND cwd_git = 1 LIMIT 1"),
+        flagNewDir: db.prepare("INSERT INTO meta(key, value) VALUES (?, '1') ON CONFLICT(key) DO UPDATE SET value = excluded.value"),
+        setRepo: db.prepare("UPDATE sessions SET repo = ?, repo_root = ? WHERE sid = ?"),
+        resolveRepo: repoResolver(db),
+        implicitKey: implicitRepoKey(db),
     };
 }
 const statementCache = new WeakMap();
@@ -337,7 +387,7 @@ function statements(db) {
 export function hasChanged(file, row) {
     return !row || row.size !== file.size || row.mtime !== file.mtimeMs || row.ino !== file.ino;
 }
-function ensureSession(db, s, file) {
+function ensureSession(db, s, file, host) {
     const existing = s.session.get(file.sessionId);
     if (existing)
         return existing;
@@ -349,6 +399,7 @@ function ensureSession(db, s, file) {
             isSubagent: file.isSubagent ? 1 : 0,
             parent: file.parentSessionId ?? null,
             title: file.isSubagent ? subagentTitle(file) : null,
+            host,
         });
     }).immediate();
     return s.session.get(file.sessionId);
@@ -358,6 +409,7 @@ const loggedClaimed = new Set();
 export function indexFile(db, file, options = {}) {
     const s = statements(db);
     const batchBytes = options.batchBytes ?? DEFAULT_BATCH_BYTES;
+    const host = options.host ?? CONFIG.host;
     const result = {
         status: "unchanged", reset: false, messagesAdded: 0, bytesRead: 0, complete: true, duplicates: noDuplicates(),
     };
@@ -377,7 +429,7 @@ export function indexFile(db, file, options = {}) {
             }
             return result;
         }
-        let session = ensureSession(db, s, file);
+        let session = ensureSession(db, s, file, host);
         result.sessionSid = session.sid;
         let row = s.file.get(file.path);
         const keyed = format.uuidLines === true;
@@ -438,6 +490,7 @@ export function indexFile(db, file, options = {}) {
             };
         }
         const builder = new RowBuilder(pending, snap.maxSeq === null ? 0 : snap.maxSeq + 1, !!session.first_prompt, parsePendingTools(snap.state?.pending_tools));
+        builder.sessionCwd = (session.context_copied & COPIED_CWD) !== 0 ? null : session.cwd;
         const tr = format.translator(file, offset > 0);
         let head = row?.head ?? "";
         // The session's cwd, as far as it is known; a project the path does not carry starts as
@@ -545,7 +598,45 @@ export function indexFile(db, file, options = {}) {
                         }
                         r.dirty = false;
                     }
-                    s.updateSession.run({ ...update, added, sid: session.sid });
+                    const hasGit = (i) => !!i && i.cwd_git === 1;
+                    const before = s.repoIdent.get(session.sid);
+                    // A remote's credentials never reach the database.
+                    s.updateSession.run({
+                        ...update, gitRemote: update.gitRemote ? stripRemoteCredentials(update.gitRemote) : null,
+                        copiedGitRemote: update.copiedGitRemote ? stripRemoteCredentials(update.copiedGitRemote) : null,
+                        added, host, sid: session.sid,
+                    });
+                    // Resolve on write: O(1) per file, covering sweep and query-time top-up alike. A session
+                    // that cannot resolve stays null until its own file is next read. Every lookup is
+                    // scoped by the host stored on the session (the first host wins), not this call's.
+                    const ident = s.repoIdent.get(session.sid);
+                    // The first git evidence at a directory on a host (a branch or remote on a line at the
+                    // cwd) may fold worktree sessions already resolved under it (<dir>/.worktrees/<n>
+                    // indexed before <dir> itself): it flags the next sweep's full pass. A session whose
+                    // unknown host was just filled brings its evidence to that host for the first time.
+                    const newAtCwd = (has) => !!ident.cwd && has(ident) && (!has(before) || before?.cwd !== ident.cwd || before?.host !== ident.host);
+                    if (newAtCwd(hasGit) && s.gitCwdSeen.get(ident.host, ident.cwd, session.sid) === undefined) {
+                        s.flagNewDir.run(REPO_NEW_DIR_KEY);
+                    }
+                    // A first remote with git evidence at the cwd is an implicit map row there: when it
+                    // changes the key that directory's sessions take (sessions resolved before it took
+                    // the path), it flags the full pass too.
+                    else if (newAtCwd((i) => hasGit(i) && !!i?.git_remote) &&
+                        s.implicitKey(ident.host, ident.cwd, session.sid) !== s.implicitKey(ident.host, ident.cwd)) {
+                        s.flagNewDir.run(REPO_NEW_DIR_KEY);
+                    }
+                    // A session's own cwd or remote replaced one its copied lines gave, or its unknown
+                    // host was filled: resolve it again.
+                    if (ident.repo !== null && before && ((before.cwd !== null && before.cwd !== ident.cwd) ||
+                        (before.git_remote !== null && before.git_remote !== ident.git_remote) || before.host !== ident.host)) {
+                        s.setRepo.run(null, null, session.sid);
+                        ident.repo = null;
+                    }
+                    if (ident.repo === null && (ident.cwd || ident.git_remote)) {
+                        const repo = s.resolveRepo({ host: ident.host, cwd: ident.cwd, gitRemote: ident.git_remote });
+                        if (repo)
+                            s.setRepo.run(repo.key, repo.root, session.sid);
+                    }
                     const tail = builder.pending;
                     const tailState = {
                         tailRowid: tail?.rowid ?? null, tailMsgId: tail?.msgId ?? null, pendingTools: serializePendingTools(builder.calls),

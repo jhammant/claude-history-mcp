@@ -10,6 +10,7 @@ import { SOURCES, SOURCE_LABELS } from "../formats/types.js";
 import { importLegacy } from "../indexing/legacy-import.js";
 import { rebuild } from "../indexing/rebuild.js";
 import { changedTranscripts, sweep, SweepBusyError, topUp } from "../indexing/sweep.js";
+import { recordRepos } from "../repos/probe.js";
 import { formatDateTime } from "../search/format.js";
 import { SearchEngine } from "../search/search-engine.js";
 import { handleSearchHistory } from "../tools/search-history.js";
@@ -64,7 +65,8 @@ function sweepLine(stats) {
     return `${changed} in ${(stats.ms / 1000).toFixed(1)} s; ${n(stats.transcripts)} transcripts on disk, ` +
         `${n(stats.sessions)} sessions and ${n(stats.messages)} messages in the database (${bytes(stats.databaseBytes)})` +
         `${stats.summarized ? `; ${n(stats.summarized)} summaries refreshed` : ""}${stats.optimized ? "; search index optimised" : ""}` +
-        `${stats.vacuumed ? "; database compacted" : ""}.`;
+        `${stats.vacuumed ? "; database compacted" : ""}.` +
+        `${stats.repoError ? ` Repository attribution failed (will retry): ${stats.repoError}` : ""}`;
 }
 function runSweep(args) {
     const db = openDatabase(CONFIG.databaseFile, { create: true });
@@ -162,9 +164,14 @@ function runStatus(args) {
             console.log(JSON.stringify(status));
             return 0;
         }
+        const hostRows = db.prepare("SELECT host, count(*) AS n FROM sessions GROUP BY host ORDER BY n DESC, host").all();
+        const hostsLine = hostRows.some((r) => r.host !== "")
+            ? [`Hosts: ${hostRows.map((r) => (r.host ? `${r.host} (${n(r.n)} sessions)` : `unknown (${n(r.n)})`)).join(", ")}`]
+            : [];
         console.log([
             `Database: ${status.database} (${bytes(status.bytes)})`,
             `Sessions: ${n(status.sessions)} (${SOURCES.map((s) => `${n(sessionsOf(status.sessionsBySource, s))} ${SOURCE_LABELS[s]}`).join(", ")}, ${n(status.subagentSessions)} subagent runs, ${n(status.archivedSessions)} archived from the old index)`,
+            ...hostsLine,
             `Messages: ${n(status.messages)}, oldest ${formatDateTime(status.oldestMessage)}, newest ${formatDateTime(status.newestMessage)}`,
             `Files behind: ${n(status.filesBehind)} of ${n(status.transcripts)} transcripts changed since they were indexed`,
             `Last sweep: ${lastSweep ? `${formatDateTime(lastSweep)}${status.lastSweepMs !== null ? ` (took ${(status.lastSweepMs / 1000).toFixed(1)} s)` : ""}` : "never"}`,
@@ -247,6 +254,7 @@ const HELP = `claude-history-mcp: search past Claude Code, Codex and pi conversa
   node dist/index.js rebuild [--json]   build a fresh database and swap it in, keeping archived sessions
   node dist/index.js status [--json]    database size, counts, files behind, last sweep
   node dist/index.js import-legacy      one-time import of the old index.msgpack, summaries/ and knowledge.json
+  node dist/index.js record-repo [dir]  note which git repository a directory belongs to (prints nothing)
   node dist/index.js search "<query>" [--limit N] [--project P] [--context] [--sort recent] [--timing] [--no-topup]
 
 Environment: CLAUDE_HISTORY_DATA_DIR, CLAUDE_HISTORY_CLAUDE_DIR, CLAUDE_HISTORY_PROJECTS_DIR,
@@ -267,6 +275,15 @@ export async function runCommand(command, argv) {
                 return await runImportLegacy(args);
             case "search":
                 return runSearch(args);
+            case "record-repo":
+                // Runs at every session start: silent, never fails, and never opens the database.
+                try {
+                    recordRepos([args.positional[0] ?? process.cwd()]);
+                }
+                catch {
+                    // process.cwd() throws when the directory was deleted: nothing to record
+                }
+                return 0;
             default:
                 console.log(HELP);
                 return 0;

@@ -8,6 +8,9 @@ import { getMeta, isBusyError, setMeta, withBusyTimeout } from "../db/database.j
 import { extractKnowledge } from "../knowledge/knowledge-extractor.js";
 import { replaceSessionKnowledge } from "../knowledge/knowledge-store.js";
 import { loadParsedSession } from "../knowledge/parsed-session.js";
+import { loadRepoMaps } from "../repos/map.js";
+import { recordRepos } from "../repos/probe.js";
+import { REPO_NEW_DIR_KEY, repoResolvedStamp, resolveAllSessions } from "../repos/resolve.js";
 import { saveSummary, summarizeSession } from "../knowledge/session-summarizer.js";
 import { listSubagentFiles, listTranscripts } from "../parsers/transcript-files.js";
 import { hasChanged, indexFile, noDuplicates } from "./indexer.js";
@@ -100,6 +103,39 @@ function refreshKnowledge(db, sids) {
     }
     return count;
 }
+/** Distinct working directories of this host's sessions: the given ones, or all of them. */
+function hostDirs(db, sids) {
+    if (sids === null) {
+        return db.prepare("SELECT DISTINCT cwd FROM sessions WHERE host = ? AND cwd IS NOT NULL AND cwd <> ''").pluck().all(CONFIG.host);
+    }
+    const dirs = new Set();
+    const one = db.prepare("SELECT cwd FROM sessions WHERE sid = ? AND host = ? AND cwd IS NOT NULL AND cwd <> ''").pluck();
+    for (const sid of sids) {
+        const cwd = one.get(sid, CONFIG.host);
+        if (cwd)
+            dirs.add(cwd);
+    }
+    return [...dirs];
+}
+/**
+ * Repository attribution: probe git for the directories (the map file is the single record, so a
+ * rebuild keeps worktrees deleted since), load the files, and run the full pass when the map,
+ * the resolver stamp or the new-directory flag says it is due. New sessions are resolved as
+ * their files are indexed; an idle sweep costs a read of the map file and two meta reads.
+ */
+function resolveRepositories(db, indexed, probe) {
+    const stampChanged = getMeta(db, "repo_resolved") !== repoResolvedStamp();
+    if (probe)
+        recordRepos(hostDirs(db, stampChanged ? null : indexed), { mapDir: CONFIG.repoMapDir, host: CONFIG.host });
+    const maps = loadRepoMaps(db, CONFIG.repoMapDir, CONFIG.host);
+    if (maps.changed || stampChanged || getMeta(db, REPO_NEW_DIR_KEY) !== undefined) {
+        db.transaction(() => {
+            resolveAllSessions(db);
+            setMeta(db, "repo_resolved", repoResolvedStamp());
+            db.prepare("DELETE FROM meta WHERE key = ?").run(REPO_NEW_DIR_KEY);
+        }).immediate();
+    }
+}
 /** Count new messages towards the next VACUUM. */
 export function noteNewMessages(db, added) {
     setMeta(db, "messages_since_vacuum", String(Number(getMeta(db, "messages_since_vacuum") ?? 0) + added));
@@ -143,6 +179,7 @@ export function sweep(db, options = {}) {
             duplicates: noDuplicates(),
         };
         const touched = new Set();
+        const indexedSids = new Set();
         let lastReport = Date.now();
         // Claude files in a fixed order (line-keys.ts, indexingOrder): the session that existed first
         // keeps the lines a later fork copied, in every sweep and in a rebuild alike, unless the fork
@@ -168,6 +205,8 @@ export function sweep(db, options = {}) {
                 stats.reset++;
             stats.messagesAdded += result.messagesAdded;
             stats.bytesRead += result.bytesRead;
+            if (result.sessionSid !== undefined)
+                indexedSids.add(result.sessionSid);
             if (result.sessionSid !== undefined && (result.messagesAdded > 0 || result.reset))
                 touched.add(result.sessionSid);
             // A session read again from scratch: its other files (a twin under another project path)
@@ -187,6 +226,13 @@ export function sweep(db, options = {}) {
             }
         }
         stats.summarized = refreshKnowledge(db, touched);
+        // A repository failure never fails the sweep; the stamp or flag stays, so the next sweep retries.
+        try {
+            resolveRepositories(db, indexedSids, options.probeRepos !== false);
+        }
+        catch (error) {
+            stats.repoError = error instanceof Error ? error.message : String(error);
+        }
         const sinceOptimize = Number(getMeta(db, "messages_since_optimize") ?? 0) + stats.messagesAdded;
         if (sinceOptimize >= OPTIMIZE_AFTER_MESSAGES) {
             db.prepare("INSERT INTO messages_fts(messages_fts) VALUES ('optimize')").run();

@@ -18,6 +18,8 @@ export interface QueryFilters {
     role?: Role;
     source?: Source;
     session?: string;
+    /** Machine name; "unknown" matches sessions indexed before hosts were recorded. */
+    host?: string;
 }
 /** One search term: the token parts FTS5 will see (several parts = a phrase). */
 export interface Term {

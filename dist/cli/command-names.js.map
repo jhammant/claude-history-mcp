@@ -1,1 +1,1 @@
-{"version":3,"file":"command-names.js","sourceRoot":"","sources":["../../src/cli/command-names.ts"],"names":[],"mappings":"AAAA,MAAM,CAAC,MAAM,QAAQ,GAAG,CAAC,OAAO,EAAE,OAAO,EAAE,SAAS,EAAE,QAAQ,EAAE,eAAe,EAAE,QAAQ,EAAE,MAAM,CAAU,CAAC"}
+{"version":3,"file":"command-names.js","sourceRoot":"","sources":["../../src/cli/command-names.ts"],"names":[],"mappings":"AAAA,MAAM,CAAC,MAAM,QAAQ,GAAG,CAAC,OAAO,EAAE,OAAO,EAAE,SAAS,EAAE,QAAQ,EAAE,eAAe,EAAE,QAAQ,EAAE,aAAa,EAAE,MAAM,CAAU,CAAC"}

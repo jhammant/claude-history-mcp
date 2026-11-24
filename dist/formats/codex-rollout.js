@@ -288,7 +288,8 @@ class RolloutTranslator {
     resumed;
     cwd = null;
     branch = null;
-    /** The header's cwd: its git branch describes that directory only. */
+    remote = null;
+    /** The header's cwd: its git branch and remote describe that directory only. */
     headerCwd = null;
     guardian = false;
     /** Distinguishes this read's turn ids from an earlier read's, so a reopened row is never matched by accident. */
@@ -341,11 +342,15 @@ class RolloutTranslator {
         const git = asRecord(payload.git);
         if (typeof git?.branch === "string" && git.branch)
             this.branch = git.branch;
+        if (typeof git?.repository_url === "string" && git.repository_url)
+            this.remote = git.repository_url;
     }
     /**
-     * Line fields. The header's git branch is attached only to a line at the header's cwd: on
-     * a line at another directory (a turn_context cwd, an exec workdir) it would describe a
-     * directory that may not be on that branch.
+     * Line fields. The header's git branch and remote are attached only to a line at the
+     * header's cwd: on a line at another directory (a turn_context cwd, an exec workdir) they
+     * would claim git evidence for a directory that may not be a work tree. Such a line carries
+     * the remote as sessionGitRemote instead, which the indexer keeps as the session's remote
+     * without counting it as evidence for that line's cwd.
      */
     base(obj, cwd = this.cwd) {
         const atHeader = !!cwd && cwd === this.headerCwd;
@@ -355,6 +360,8 @@ class RolloutTranslator {
             // A fork's first own line is often a call at an exec workdir: the session's cwd is its header's.
             ...(this.fork && this.headerCwd ? { sessionCwd: this.headerCwd } : {}),
             ...(atHeader && this.branch ? { gitBranch: this.branch } : {}),
+            ...(atHeader && this.remote ? { gitRemote: this.remote } : {}),
+            ...(!atHeader && this.remote ? { sessionGitRemote: this.remote } : {}),
         };
     }
     /** An assistant line; a text or call straight after assistant output joins its turn. */

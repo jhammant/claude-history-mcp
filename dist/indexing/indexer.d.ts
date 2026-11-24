@@ -28,6 +28,8 @@ export interface IndexFileOptions {
     /** Stop after the batch in progress once Date.now() passes this. */
     deadline?: number;
     batchBytes?: number;
+    /** Machine name recorded on a session when it is created (default CONFIG.host). */
+    host?: string;
     /** Test hook: runs after a batch is parsed, before its transaction starts. */
     beforeCommit?: () => void;
 }
@@ -72,6 +74,7 @@ interface PendingRow {
     dirty: boolean;
 }
 interface SessionUpdate {
+    gitRemote: string | null;
     minTs: number | null;
     maxTs: number | null;
     added: number;
@@ -80,12 +83,16 @@ interface SessionUpdate {
     firstPrompt: string | null;
     aiTitle: string | null;
     customTitle: string | null;
+    /** 1 when a line at the session's own cwd carried a git branch or remote (only ever raises cwd_git). */
+    cwdGit: number;
     /**
-     * The cwd and branch of lines skipped because another session holds them (a fork's copied
-     * history): used only while the session's own lines have not stated them (see updateSession).
+     * The cwd, branch and remote of lines skipped because another session holds them (a fork's
+     * copied history): used only while the session's own lines have not stated them (see updateSession).
      */
     copiedCwd: string | null;
     copiedBranch: string | null;
+    copiedGitRemote: string | null;
+    copiedCwdGit: number;
 }
 /**
  * Builds message rows from transcript lines. Holds the last row open so that the next
@@ -98,6 +105,12 @@ export declare class RowBuilder {
     readonly calls: PendingTools;
     readonly finished: PendingRow[];
     update: SessionUpdate;
+    /**
+     * The session's own cwd: the stored one when the session has it, else the first cwd read. Git
+     * evidence counts for it only from a line at that cwd, since a session that started in a
+     * folder and moved into a repository records the folder as its cwd and the repository's branch.
+     */
+    sessionCwd: string | null;
     constructor(pending: PendingRow | null, nextSeq: number, hasFirstPrompt: boolean, calls: PendingTools);
     /** False for the result of a call to this server's own tools. */
     private keepResult;

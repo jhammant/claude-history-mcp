@@ -48,6 +48,8 @@ export interface SearchHit {
     parentSession: string | null;
     legacy: boolean;
     title: string | null;
+    /** Machine the session came from; "" when unknown. */
+    host: string;
     /** Text around the matched words, matches wrapped in ** **. */
     snippet: string;
     /** Where the snippet came from. */
@@ -67,10 +69,16 @@ export interface SearchResponse {
     candidates: number;
     capped: boolean;
     empty: boolean;
+    /** True when sessions from more than one host exist, so result lines name theirs. */
+    showHost: boolean;
 }
 export declare class SearchEngine {
     private db;
     constructor(db: DB);
+    /** Set per search() call: the repositories its project filter reaches, computed once. */
+    private repoMemo;
+    /** The repositories a project filter reaches (see reposForProjectFilter). */
+    private projectRepos;
     /**
      * The filters that can run inside the MATCH, as scope expressions. `none` when the
      * session filters match no session at all.

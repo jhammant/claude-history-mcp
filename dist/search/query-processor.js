@@ -7,7 +7,7 @@
  *   "an exact phrase"   a OR b   index.msgpack (punctuated terms become phrases)
  */
 import { SOURCES } from "../formats/types.js";
-const FILTER_KEYS = new Set(["project", "before", "after", "tool", "branch", "role", "source", "session"]);
+const FILTER_KEYS = new Set(["project", "before", "after", "tool", "branch", "role", "source", "session", "host"]);
 const MAX_GROUPS = 16;
 /** Same characters FTS5's unicode61 tokenizer keeps inside a token. */
 const TOKEN = /[\p{L}\p{N}\p{M}\p{Co}]+/gu;
@@ -90,6 +90,7 @@ function applyFilter(filters, key, value) {
         case "tool":
         case "branch":
         case "session":
+        case "host":
             filters[key] = value;
             return true;
         case "before":

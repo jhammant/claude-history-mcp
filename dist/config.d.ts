@@ -1,3 +1,5 @@
+/** A host name safe to store, show and use as a file name: [A-Za-z0-9._-], no leading . or -, at most 64 characters. */
+export declare function cleanHostName(raw: string): string;
 export declare const CONFIG: {
     readonly claudeDir: string;
     readonly projectsDir: string;
@@ -6,6 +8,12 @@ export declare const CONFIG: {
     readonly piSessionsDir: string;
     readonly settingsFile: string;
     readonly dataDir: string;
+    /** This machine's name, recorded on each session when it is first indexed. */
+    readonly host: string;
+    readonly repoMapDir: string;
+    readonly repoHostAliases: string | undefined;
+    /** Folder names directly under a repository that hold its worktrees. */
+    readonly worktreeDirs: string[];
     readonly databaseFile: string;
     /** Files of the pre-SQLite store, read only by `import-legacy`. */
     legacy: {

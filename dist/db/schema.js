@@ -3,12 +3,13 @@
  * migration runs in its own transaction, in order, exactly once.
  */
 import { SCHEMA_V3, SCHEMA_V3_COLUMNS } from "./schema-lines.js";
+import { SCHEMA_V4, SCHEMA_V4_COLUMNS } from "./schema-repos.js";
 const SCHEMA_V1 = `
 CREATE TABLE sessions (
   sid            INTEGER PRIMARY KEY,
   id             TEXT NOT NULL UNIQUE,      -- file name stem: <uuid>, codex-<id> or agent-<id>
   project        TEXT NOT NULL,             -- encoded project dir, e.g. -work-app
-  cwd            TEXT,                      -- (v3 adds index_rev, context_copied: see schema-lines.ts)
+  cwd            TEXT,                      -- (v3 adds index_rev, context_copied: schema-lines.ts; v4 adds host, git_remote, repo, repo_root, cwd_git: schema-repos.ts)
   git_branch     TEXT,
   source         TEXT NOT NULL,             -- 'claude' | 'codex' | 'pi'
   is_subagent    INTEGER NOT NULL DEFAULT 0,
@@ -199,6 +200,15 @@ export const MIGRATIONS = [
         up: (db) => {
             addColumns(db, SCHEMA_V3_COLUMNS);
             db.exec(SCHEMA_V3);
+        },
+    },
+    {
+        // No backfill: old rows keep host '' (shown as "unknown") until a rebuild or a later sweep.
+        version: 4,
+        description: "host and repository identity: sessions.host/git_remote/repo/repo_root/cwd_git and repo_map",
+        up: (db) => {
+            addColumns(db, SCHEMA_V4_COLUMNS);
+            db.exec(SCHEMA_V4);
         },
     },
 ];
