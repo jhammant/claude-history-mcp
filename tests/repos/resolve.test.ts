@@ -142,34 +142,34 @@ describe('repoResolver', () => {
     map('laptop', '/home/me/src/worktree-x', '/home/me/src/app', null);
     map('laptop', '/w/b', '/w/b-root', 'https://h.example/o/b.git');
     map('laptop', '/w/b/inner', '/w/inner-root', null);
-    expect(resolve({ host: 'laptop', cwd: '/home/me/src/worktree-x/src', gitRemote: null }))
+    expect(resolve({ host: 'laptop', cwd: '/home/me/src/worktree-x/src', gitRemote: null, cwdGit: false }))
       .toEqual({ key: 'laptop:/home/me/src/app', name: 'app', root: '/home/me/src/app' });
-    expect(resolve({ host: 'laptop', cwd: '/w/b/sub/dir', gitRemote: null }))
+    expect(resolve({ host: 'laptop', cwd: '/w/b/sub/dir', gitRemote: null, cwdGit: false }))
       .toEqual({ key: 'h.example/o/b', name: 'b', root: '/w/b-root' });
-    expect(resolve({ host: 'laptop', cwd: '/w/b/inner/x', gitRemote: null })?.root).toBe('/w/inner-root');
-    expect(resolve({ host: 'laptop', cwd: '/w/bc', gitRemote: null })).toEqual({ key: 'laptop:/w/bc', name: 'bc', root: '/w/bc' });
+    expect(resolve({ host: 'laptop', cwd: '/w/b/inner/x', gitRemote: null, cwdGit: false })?.root).toBe('/w/inner-root');
+    expect(resolve({ host: 'laptop', cwd: '/w/bc', gitRemote: null, cwdGit: false })).toEqual({ key: 'laptop:/w/bc', name: 'bc', root: '/w/bc' });
   });
 
   it('step 3: pattern folding when no map row matches', () => {
-    expect(resolve({ host: 'laptop', cwd: '/w/app/.claude/worktrees/t1/src', gitRemote: null }))
+    expect(resolve({ host: 'laptop', cwd: '/w/app/.claude/worktrees/t1/src', gitRemote: null, cwdGit: false }))
       .toEqual({ key: 'laptop:/w/app', name: 'app', root: '/w/app' });
   });
 
   it('step 4: the cwd itself', () => {
-    expect(resolve({ host: 'laptop', cwd: '/w/plain/', gitRemote: null }))
+    expect(resolve({ host: 'laptop', cwd: '/w/plain/', gitRemote: null, cwdGit: false }))
       .toEqual({ key: 'laptop:/w/plain', name: 'plain', root: '/w/plain' });
   });
 
   it('knows the repo from a remote alone, and returns null with nothing usable', () => {
     expect(resolve({ host: 'laptop', cwd: null, gitRemote: 'https://h.example/o/r.git', cwdGit: false }))
       .toEqual({ key: 'h.example/o/r', name: 'r', root: null });
-    expect(resolve({ host: 'laptop', cwd: null, gitRemote: null })).toBeNull();
+    expect(resolve({ host: 'laptop', cwd: null, gitRemote: null, cwdGit: false })).toBeNull();
     expect(resolve({ host: 'laptop', cwd: null, gitRemote: 'nonsense', cwdGit: false })).toBeNull();
   });
 
   it('folds worktrees when a session with a git branch or remote, or a map entry, shows the parent is a repository', () => {
     const cwd = '/home/me/src/app/worktrees/k2';
-    const input = { host: 'laptop', cwd, gitRemote: null };
+    const input = { host: 'laptop', cwd, gitRemote: null, cwdGit: false };
     expect(resolve(input)?.root).toBe(cwd);
     // A bare session in the parent is weak evidence: a folder of repositories is a working directory too.
     db.prepare("INSERT INTO sessions(id, project, host, cwd, source) VALUES ('bare', 'p', 'laptop', '/home/me/src/app', 'claude')").run();
@@ -188,7 +188,7 @@ describe('repoResolver', () => {
   });
 
   it('resolves the filesystem root to itself', () => {
-    expect(resolve({ host: 'laptop', cwd: '/', gitRemote: null })).toEqual({ key: 'laptop:/', name: '/', root: '/' });
+    expect(resolve({ host: 'laptop', cwd: '/', gitRemote: null, cwdGit: false })).toEqual({ key: 'laptop:/', name: '/', root: '/' });
   });
 
   it('gives two cwds on different paths one key through a shared remote', () => {
@@ -199,30 +199,30 @@ describe('repoResolver', () => {
   });
 
   it('treats the same path on two hosts as two repositories', () => {
-    expect(resolve({ host: 'laptop', cwd: '/home/me/app', gitRemote: null })!.key).toBe('laptop:/home/me/app');
-    expect(resolve({ host: 'desktop', cwd: '/home/me/app', gitRemote: null })!.key).toBe('desktop:/home/me/app');
+    expect(resolve({ host: 'laptop', cwd: '/home/me/app', gitRemote: null, cwdGit: false })!.key).toBe('laptop:/home/me/app');
+    expect(resolve({ host: 'desktop', cwd: '/home/me/app', gitRemote: null, cwdGit: false })!.key).toBe('desktop:/home/me/app');
   });
 
   it("does not apply one host's map row or git evidence to another host", () => {
     map('laptop', '/home/me/app', '/home/me/app', 'https://example.com/acme/app.git');
     gitSession('tools', 'laptop', '/home/me/tools');
     // the same facts do apply on their own host
-    expect(resolve({ host: 'laptop', cwd: '/home/me/app', gitRemote: null })!.key).toBe('example.com/acme/app');
-    expect(resolve({ host: 'laptop', cwd: '/home/me/tools/worktrees/x', gitRemote: null })!.root).toBe('/home/me/tools');
-    expect(resolve({ host: 'desktop', cwd: '/home/me/app', gitRemote: null })!.key).toBe('desktop:/home/me/app');
-    expect(resolve({ host: 'desktop', cwd: '/home/me/tools/worktrees/x', gitRemote: null })!.root).toBe('/home/me/tools/worktrees/x');
+    expect(resolve({ host: 'laptop', cwd: '/home/me/app', gitRemote: null, cwdGit: false })!.key).toBe('example.com/acme/app');
+    expect(resolve({ host: 'laptop', cwd: '/home/me/tools/worktrees/x', gitRemote: null, cwdGit: false })!.root).toBe('/home/me/tools');
+    expect(resolve({ host: 'desktop', cwd: '/home/me/app', gitRemote: null, cwdGit: false })!.key).toBe('desktop:/home/me/app');
+    expect(resolve({ host: 'desktop', cwd: '/home/me/tools/worktrees/x', gitRemote: null, cwdGit: false })!.root).toBe('/home/me/tools/worktrees/x');
   });
 
   it("does not take another host's implicit map row", () => {
     db.prepare(`INSERT INTO sessions(id, project, host, cwd, git_remote, cwd_git, source)
       VALUES ('codex', 'p', 'laptop', '/home/me/app', 'https://example.com/acme/app.git', 1, 'codex')`).run();
-    expect(resolve({ host: 'laptop', cwd: '/home/me/app', gitRemote: null })!.key).toBe('example.com/acme/app');
-    expect(resolve({ host: 'desktop', cwd: '/home/me/app', gitRemote: null })!.key).toBe('desktop:/home/me/app');
+    expect(resolve({ host: 'laptop', cwd: '/home/me/app', gitRemote: null, cwdGit: false })!.key).toBe('example.com/acme/app');
+    expect(resolve({ host: 'desktop', cwd: '/home/me/app', gitRemote: null, cwdGit: false })!.key).toBe('desktop:/home/me/app');
   });
 
   it('gives one key to a repository with a remote on every host', () => {
     map('laptop', '/home/me/app', '/home/me/app', 'https://example.com/acme/app.git');
-    const laptop = resolve({ host: 'laptop', cwd: '/home/me/app/src', gitRemote: null });
+    const laptop = resolve({ host: 'laptop', cwd: '/home/me/app/src', gitRemote: null, cwdGit: false });
     const desktop = resolve({ host: 'desktop', cwd: '/srv/code/app', gitRemote: 'git@example.com:acme/app.git', cwdGit: true });
     expect(laptop).toEqual({ key: 'example.com/acme/app', name: 'app', root: '/home/me/app' });
     expect(desktop).toEqual({ key: 'example.com/acme/app', name: 'app', root: '/srv/code/app' });
@@ -231,21 +231,21 @@ describe('repoResolver', () => {
   it('does not fold a worktrees folder that sits in a folder of unrelated repositories', () => {
     gitSession('alpha', 'laptop', '/home/me/src/alpha');
     gitSession('beta', 'laptop', '/home/me/src/beta');
-    expect(resolve({ host: 'laptop', cwd: '/home/me/src/worktrees/alpha-fix', gitRemote: null })!.root)
+    expect(resolve({ host: 'laptop', cwd: '/home/me/src/worktrees/alpha-fix', gitRemote: null, cwdGit: false })!.root)
       .toBe('/home/me/src/worktrees/alpha-fix');
   });
 
   it('keys a Windows working directory by its own path', () => {
-    expect(resolve({ host: 'pc', cwd: 'C:\\Users\\me\\app', gitRemote: null }))
+    expect(resolve({ host: 'pc', cwd: 'C:\\Users\\me\\app', gitRemote: null, cwdGit: false }))
       .toEqual({ key: 'pc:C:\\Users\\me\\app', name: 'app', root: 'C:\\Users\\me\\app' });
-    expect(resolve({ host: 'pc', cwd: 'C:\\', gitRemote: null })!.key).toBe('pc:C:\\');
+    expect(resolve({ host: 'pc', cwd: 'C:\\', gitRemote: null, cwdGit: false })!.key).toBe('pc:C:\\');
   });
 
   it('keeps a plain path key for a session with no host', () => {
-    expect(resolve({ host: '', cwd: '/home/me/app', gitRemote: null }))
+    expect(resolve({ host: '', cwd: '/home/me/app', gitRemote: null, cwdGit: false }))
       .toEqual({ key: '/home/me/app', name: 'app', root: '/home/me/app' });
     map('', '/home/me/lib', '/home/me/lib-root', null);
-    expect(resolve({ host: '', cwd: '/home/me/lib', gitRemote: null })!.key).toBe('/home/me/lib-root');
+    expect(resolve({ host: '', cwd: '/home/me/lib', gitRemote: null, cwdGit: false })!.key).toBe('/home/me/lib-root');
   });
 });
 

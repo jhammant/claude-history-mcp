@@ -433,6 +433,45 @@ describe('one Claude line, one row: forks and sibling subagents', () => {
     });
   });
 
+  describe("a fork's remote follows the same rule as its cwd and branch (context_copied bit 4)", () => {
+    const REMOTE = 'https://example.com/acme/app.git';
+    const OWN = 'https://example.com/acme/fork.git';
+    const row = "SELECT git_remote, context_copied & 4 AS remote_copied FROM sessions WHERE id = 'r-fork'";
+    const withRemote = (lines: Line[], remote: string): Line[] => lines.map((l) => ({ ...l, gitRemote: remote }));
+    const bareOwn = () => stream('r-fork', 700, 60, 'raft').map(({ cwd: _c, gitBranch: _g, ...rest }) => rest);
+
+    it('takes the remote of the copied lines when its own lines never state one, and marks it copied', () => {
+      corpus.write(corpus.sessionPath(HOME, 'orig'), original);
+      corpus.write(corpus.sessionPath(HOME, 'r-fork'), [...withRemote(copied(original.slice(2, 9), 'r-fork'), REMOTE), ...bareOwn()]);
+      sweep(corpus.open());
+      expect(corpus.open().prepare(row).get()).toEqual({ git_remote: REMOTE, remote_copied: 4 });
+    });
+
+    it("replaces it with the fork's own remote when its own lines state one later, and clears the mark", () => {
+      const f = corpus.sessionPath(HOME, 'r-fork');
+      corpus.write(corpus.sessionPath(HOME, 'orig'), original);
+      corpus.write(f, withRemote(copied(original.slice(2, 9), 'r-fork'), REMOTE));
+      const db = corpus.open();
+      sweep(db);
+      expect(db.prepare(row).get()).toEqual({ git_remote: REMOTE, remote_copied: 4 });
+      corpus.append(f, withRemote(bareOwn(), OWN));
+      sweep(db);
+      expect(db.prepare(row).get()).toEqual({ git_remote: OWN, remote_copied: 0 });
+    });
+
+    it("keeps its own remote when copied lines with another one arrive after it", () => {
+      const f = corpus.sessionPath(HOME, 'r-fork');
+      corpus.write(corpus.sessionPath(HOME, 'orig'), original);
+      corpus.write(f, withRemote(bareOwn().slice(0, 5), OWN));
+      const db = corpus.open();
+      sweep(db);
+      expect(db.prepare(row).get()).toEqual({ git_remote: OWN, remote_copied: 0 });
+      corpus.append(f, [...withRemote(copied(original.slice(2, 9), 'r-fork'), REMOTE), ...bareOwn().slice(5)]);
+      sweep(db);
+      expect(db.prepare(row).get()).toEqual({ git_remote: OWN, remote_copied: 0 });
+    });
+  });
+
   it('drops a batch whose new lines another session took meanwhile, and the next sweep loses and doubles nothing', () => {
     const f = corpus.write(corpus.sessionPath(HOME, 'a-fork'), fork);
     const o = corpus.write(corpus.sessionPath(HOME, 'orig'), original);

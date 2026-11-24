@@ -62,6 +62,27 @@ describe.skipIf(!hasGit)("git probe", () => {
     expect(probeRepo(repo)).toEqual([{ dir: repo, root: repo, remote: null }]);
   });
 
+  it("takes the bare repository itself as the root of a worktree linked from it", () => {
+    const bare = join(tmp, "bare.git");
+    git(tmp, "clone", "-q", "--bare", repo, bare);
+    const wt = join(tmp, "from-bare");
+    git(bare, "worktree", "add", "-q", wt, "main");
+    expect(probeRepo(wt)).toEqual([{ dir: wt, root: bare, remote: repo }]); // origin is the clone source
+    // the bare repository is not a work tree, so it has no entry of its own
+    expect(probeRepo(bare)).toEqual([]);
+  });
+
+  it("takes the checked-out submodule directory as the root of a submodule", () => {
+    const outer = join(tmp, "outer");
+    mkdirSync(outer);
+    git(outer, "init", "-q");
+    git(outer, "-c", "protocol.file.allow=always", "submodule", "add", "-q", repo, "sub");
+    const sub = join(outer, "sub");
+    expect(probeRepo(sub)).toEqual([{ dir: sub, root: sub, remote: repo }]);
+    // the enclosing repository is still its own root
+    expect(probeRepo(outer)).toEqual([{ dir: outer, root: outer, remote: null }]);
+  });
+
   it("adds the logical top when the directory is reached through a symlink", () => {
     const link = join(tmp, "link");
     symlinkSync(repo, link);

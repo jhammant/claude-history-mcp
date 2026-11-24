@@ -4,7 +4,7 @@
  * timeout); every failure means "no answer", never an exception.
  */
 import { execFileSync } from "child_process";
-import { appendFileSync, chmodSync, mkdirSync, readFileSync, realpathSync, statSync } from "fs";
+import { appendFileSync, chmodSync, mkdirSync, readFileSync, realpathSync } from "fs";
 import { basename, dirname, isAbsolute, join, resolve } from "path";
 import { CONFIG } from "../config.js";
 import { stripRemoteCredentials } from "./url.js";
@@ -20,14 +20,6 @@ function git(args) {
     }
     catch {
         return null;
-    }
-}
-function isDirectory(path) {
-    try {
-        return statSync(path).isDirectory();
-    }
-    catch {
-        return false;
     }
 }
 /** The main repository root for a work tree whose common git dir is `common`. */
@@ -61,7 +53,10 @@ function tryRealpath(path) {
  * not in a work tree, or git is unavailable.
  */
 export function probeRepo(dir) {
-    if (!isDirectory(dir))
+    // No stat first: on a dead network mount it could block with no timeout. Git fails fast for a
+    // missing directory or a file, and its calls are the only ones that wait, each with a timeout.
+    // An empty path is refused here because `git -C ""` is a no-op and would probe the process's own directory.
+    if (!dir)
         return [];
     const top = git(["-C", dir, "rev-parse", "--show-toplevel"]);
     if (!top)
@@ -111,7 +106,7 @@ function value(root, remote) {
 }
 /**
  * The newest line per directory already in the file, as the loader picks it (the highest `at`;
- * on a tie the earlier line). Unparseable lines, and lines without a numeric `at`, are ignored.
+ * on a tie the later line). Unparseable lines, and lines without a numeric `at`, are ignored.
  */
 function newestLines(file) {
     const newest = new Map();
@@ -130,7 +125,7 @@ function newestLines(file) {
             if (o && typeof o === "object" && typeof o.dir === "string" && typeof o.root === "string" &&
                 typeof o.at === "number" && Number.isFinite(o.at)) {
                 const prior = newest.get(o.dir);
-                if (!prior || o.at > prior.at) {
+                if (!prior || o.at >= prior.at) {
                     newest.set(o.dir, { value: value(o.root, typeof o.remote === "string" && o.remote ? o.remote : null), at: o.at });
                 }
             }
@@ -164,9 +159,12 @@ export function recordRepos(dirs, options = {}) {
                 const prior = newest.get(entry.dir);
                 if (prior && prior.value === v)
                     continue;
-                appendFileSync(file, JSON.stringify({ dir: entry.dir, root: entry.root, remote: entry.remote, at }) + "\n", { mode: 0o600 });
+                // A changed value is stamped after the line it replaces, so a tie in time can never hide it
+                // (a loader that has stored the earlier line only accepts a strictly newer one).
+                const stamp = prior && prior.at >= at ? prior.at + 1 : at;
+                appendFileSync(file, JSON.stringify({ dir: entry.dir, root: entry.root, remote: entry.remote, at: stamp }) + "\n", { mode: 0o600 });
                 chmodSync(file, 0o600);
-                newest.set(entry.dir, { value: v, at });
+                newest.set(entry.dir, { value: v, at: stamp });
                 added++;
             }
         }

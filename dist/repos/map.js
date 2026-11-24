@@ -129,7 +129,7 @@ export function loadRepoMaps(db, mapDir, host, options = {}) {
                 continue;
             entries++;
             const prior = newest.get(entry.dir);
-            if (!prior || entry.at > prior.at)
+            if (!prior || entry.at >= prior.at)
                 newest.set(entry.dir, entry);
         }
     }

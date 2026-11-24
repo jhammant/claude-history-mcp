@@ -163,6 +163,29 @@ describe('sweep repository step', () => {
       expect(attribution()).toEqual({ repo: 'example.com/acme/app', repo_root: repo });
     });
 
+    it('probes every session directory when the resolver stamp changes, and only the touched ones otherwise', () => {
+      const other = join(tmp, 'other');
+      mkdirSync(other, { recursive: true });
+      git(other, 'init', '-q');
+      corpus.write(corpus.sessionPath('-other', 'o1'), [userLine('hi', { cwd: other, sessionId: 'o1' })]);
+      const db = corpus.open();
+      sweep(db, NO_GIT); // indexes both sessions without probing: nothing is mapped
+      expect(db.prepare('SELECT count(*) FROM repo_map').pluck().get()).toBe(0);
+
+      // Same stamp, nothing touched: a probing sweep has nothing to probe.
+      sweep(db);
+      expect(db.prepare('SELECT count(*) FROM repo_map').pluck().get()).toBe(0);
+
+      // A changed resolver setting changes the stamp: now both directories are probed.
+      process.env.CLAUDE_HISTORY_WORKTREE_DIRS = '.trees';
+      try {
+        sweep(db);
+      } finally {
+        delete process.env.CLAUDE_HISTORY_WORKTREE_DIRS;
+      }
+      expect(db.prepare('SELECT dir FROM repo_map ORDER BY dir').pluck().all()).toEqual([other, wt].sort());
+    });
+
     it('keeps the attribution after the worktree is deleted and the index is rebuilt', async () => {
       sweep(corpus.open());
       rmSync(wt, { recursive: true, force: true });

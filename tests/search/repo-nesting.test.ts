@@ -175,3 +175,34 @@ describe('a project filter with a trailing slash', () => {
     expect(new SearchEngine(db).search('gearbox', { project: '/' }).hits).toHaveLength(3);
   });
 });
+
+describe('a project filter with LIKE wildcards', () => {
+  let corpus: Corpus;
+  let db: DB;
+  beforeEach(() => {
+    corpus = createCorpus();
+    db = build(corpus, [
+      { id: 'under', project: '-w-a_b', cwd: '/w/a_b', repo: null, root: null },
+      { id: 'other', project: '-w-axb', cwd: '/w/axb', repo: null, root: null },
+      { id: 'pct', project: '-w-100%', cwd: '/w/100%', repo: null, root: null },
+      { id: 'plain', project: '-w-1000', cwd: '/w/1000', repo: null, root: null },
+    ]);
+  });
+  afterEach(() => corpus.cleanup());
+
+  const ids = (filter: string) => new SearchEngine(db).search('gearbox', { project: filter }).hits.map((h) => h.sessionId).sort();
+
+  it('matches an underscore and a percent sign literally', () => {
+    expect(ids('a_b')).toEqual(['under']);
+    expect(ids('100%')).toEqual(['pct']);
+    expect(ids('%')).toEqual(['pct']);
+    expect(ids('a%b')).toEqual([]);
+  });
+
+  it('does the same for the project and repository matchers', () => {
+    expect(matchProjects(db, 'a_b')).toEqual(['-w-a_b']);
+    expect(matchProjects(db, '100%')).toEqual(['-w-100%']);
+    expect(matchProjects(db, 'a%b')).toEqual([]);
+    expect(reposForProjectFilter(db, 'a_b')).toEqual([]);
+  });
+});
