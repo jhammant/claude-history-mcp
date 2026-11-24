@@ -224,3 +224,48 @@ describe('a schema 3 database before any rebuild (repo NULL everywhere)', () => 
     expect(new SearchEngine(db).search('gearbox', { project: 'tools' }).hits.map((h) => h.sessionId)).toEqual(['t1']);
   });
 });
+
+describe('a schema 3 database after its first sweep (hosts unknown, plain path keys)', () => {
+  let corpus: Corpus;
+  beforeEach(() => {
+    corpus = createCorpus();
+    for (const [dir, id] of [['app', 'a1'], ['app', 'a2'], ['tools', 't1']]) {
+      corpus.write(corpus.sessionPath(`-work-${dir}`, id), [
+        userLine('gearbox question', { cwd: `/work/${dir}`, sessionId: id }),
+        assistantText('answer', { cwd: `/work/${dir}`, sessionId: id }),
+      ]);
+    }
+    const db = corpus.open();
+    sweep(db, { probeRepos: false });
+    // As schema 3 sessions just migrated: no host, no repository, never resolved.
+    db.prepare("UPDATE sessions SET host = '', repo = NULL, repo_root = NULL").run();
+    db.prepare("DELETE FROM meta WHERE key = 'repo_resolved'").run();
+    // The upgrade's first sweep: no transcript changed, so only the full pass runs.
+    sweep(db, { probeRepos: false });
+  });
+  afterEach(() => corpus.cleanup());
+
+  it('keys the old sessions by their plain path and keeps their host unknown', () => {
+    expect(corpus.open().prepare('SELECT id, host, repo, repo_root FROM sessions ORDER BY id').all()).toEqual([
+      { id: 'a1', host: '', repo: '/work/app', repo_root: '/work/app' },
+      { id: 'a2', host: '', repo: '/work/app', repo_root: '/work/app' },
+      { id: 't1', host: '', repo: '/work/tools', repo_root: '/work/tools' },
+    ]);
+  });
+
+  it('lists one project per repository, with no host line', () => {
+    const out = handleListProjects(corpus.open(), {});
+
+    expect(out).toContain('2 projects with conversation history:');
+    expect(out).toMatch(/^- app — 2 sessions, 4 messages\n {2}Directory: \/work\/app$/m);
+    expect(out).toMatch(/^- tools — 1 sessions, 2 messages\n {2}Directory: \/work\/tools$/m);
+    expect(out).not.toContain('Hosts:');
+  });
+
+  it('matches projects and filters search by the repository', () => {
+    const db = corpus.open();
+
+    expect(new SearchEngine(db).search('gearbox project:app').hits.map((h) => h.sessionId).sort()).toEqual(['a1', 'a2']);
+    expect(new SearchEngine(db).search('gearbox', { project: '/work/tools' }).hits.map((h) => h.sessionId)).toEqual(['t1']);
+  });
+});

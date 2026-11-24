@@ -1,3 +1,4 @@
+import { join } from 'path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { CONFIG, cleanHostName } from '../../src/config.js';
 import { indexFile } from '../../src/indexing/indexer.js';
@@ -45,11 +46,26 @@ describe('the host of a session', () => {
   });
 
   it('reads the other settings', () => {
-    expect(CONFIG.repoMapDir).toBe(`${CONFIG.dataDir}/repo-map`);
-    expect(CONFIG.worktreeDirs).toEqual(['.worktrees', 'worktrees']);
-    process.env.CLAUDE_HISTORY_WORKTREE_DIRS = ' wt, a/b ,, .., x ';
-    try { expect(CONFIG.worktreeDirs).toEqual(['wt', 'x']); } finally { delete process.env.CLAUDE_HISTORY_WORKTREE_DIRS; }
-    expect(CONFIG.repoHostAliases).toBeUndefined();
+    // Whatever the developer's environment holds for these is set aside and put back.
+    const names = ['CLAUDE_HISTORY_REPO_MAP_DIR', 'CLAUDE_HISTORY_WORKTREE_DIRS', 'CLAUDE_HISTORY_REPO_HOST_ALIASES'] as const;
+    const saved = names.map((name) => [name, process.env[name]] as const);
+    try {
+      for (const name of names) delete process.env[name];
+      expect(CONFIG.repoMapDir).toBe(join(CONFIG.dataDir, 'repo-map'));
+      process.env.CLAUDE_HISTORY_REPO_MAP_DIR = '/home/me/maps';
+      expect(CONFIG.repoMapDir).toBe('/home/me/maps');
+      expect(CONFIG.worktreeDirs).toEqual(['.worktrees', 'worktrees']);
+      process.env.CLAUDE_HISTORY_WORKTREE_DIRS = ' wt, a/b ,, .., x ';
+      expect(CONFIG.worktreeDirs).toEqual(['wt', 'x']);
+      process.env.CLAUDE_HISTORY_WORKTREE_DIRS = ''; // set but empty: no container names
+      expect(CONFIG.worktreeDirs).toEqual([]);
+      expect(CONFIG.repoHostAliases).toBeUndefined();
+    } finally {
+      for (const [name, value] of saved) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
   });
 
   it('records the host when a session is first indexed', () => {

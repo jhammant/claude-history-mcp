@@ -42,6 +42,11 @@ describe.skipIf(!hasGit)("git probe", () => {
   it("reports a plain repository with its origin, credentials stripped", () => {
     git(repo, "remote", "add", "origin", "https://user:tok@example.com/acme/app.git");
     expect(probeRepo(join(repo, "src"))).toEqual([{ dir: repo, root: repo, remote: "https://example.com/acme/app.git" }]);
+    // a token in the query string too
+    git(repo, "remote", "set-url", "origin", "https://user:tok@example.com/acme/app.git?access_token=tok");
+    const entries = probeRepo(join(repo, "src"));
+    expect(entries).toEqual([{ dir: repo, root: repo, remote: "https://example.com/acme/app.git" }]);
+    expect(JSON.stringify(entries)).not.toContain("tok");
   });
 
   it("reports a linked worktree with its main repository as root", () => {

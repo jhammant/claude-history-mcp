@@ -187,7 +187,9 @@ describe('sweep repository step', () => {
     const db = corpus.open(); // migrates to the current schema
     const stats = sweep(db, NO_GIT);
     expect(stats.repoError).toBeUndefined();
-    expect(db.prepare('SELECT host FROM sessions').pluck().get()).toBe(''); // untouched file: still unknown
+    // untouched file: host still unknown; the full pass gives it a plain path key (no host prefix)
+    expect(db.prepare('SELECT host, repo, repo_root FROM sessions').get()).toEqual({ host: '', repo: '/work/app', repo_root: '/work/app' });
+    expect(getMeta(db, 'repo_resolved')).toMatch(/^\d+:[0-9a-f]{8}$/);
   });
 
   it("loads only this host's map file", () => {
