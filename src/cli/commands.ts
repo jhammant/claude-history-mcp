@@ -11,6 +11,7 @@ import { SOURCES, SOURCE_LABELS, type Source } from "../formats/types.js";
 import { importLegacy } from "../indexing/legacy-import.js";
 import { rebuild } from "../indexing/rebuild.js";
 import { changedTranscripts, sweep, SweepBusyError, topUp, type SweepStats } from "../indexing/sweep.js";
+import { recordRepos } from "../repos/probe.js";
 import { formatDateTime } from "../search/format.js";
 import { SearchEngine, type SortOrder } from "../search/search-engine.js";
 import { handleSearchHistory } from "../tools/search-history.js";
@@ -279,6 +280,7 @@ const HELP = `claude-history-mcp: search past Claude Code, Codex and pi conversa
   node dist/index.js rebuild [--json]   build a fresh database and swap it in, keeping archived sessions
   node dist/index.js status [--json]    database size, counts, files behind, last sweep
   node dist/index.js import-legacy      one-time import of the old index.msgpack, summaries/ and knowledge.json
+  node dist/index.js record-repo [dir]  note which git repository a directory belongs to (prints nothing)
   node dist/index.js search "<query>" [--limit N] [--project P] [--context] [--sort recent] [--timing] [--no-topup]
 
 Environment: CLAUDE_HISTORY_DATA_DIR, CLAUDE_HISTORY_CLAUDE_DIR, CLAUDE_HISTORY_PROJECTS_DIR,
@@ -300,6 +302,10 @@ export async function runCommand(command: string, argv: string[]): Promise<numbe
         return await runImportLegacy(args);
       case "search":
         return runSearch(args);
+      case "record-repo":
+        // Runs at every session start: silent, never fails, and never opens the database.
+        recordRepos([args.positional[0] ?? process.cwd()]);
+        return 0;
       default:
         console.log(HELP);
         return 0;
