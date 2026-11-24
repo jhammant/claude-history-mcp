@@ -112,6 +112,43 @@ no index in memory, so each copy uses tens of MB rather than GBs.
 The database never drops a session because its file has gone, so it becomes the long-term
 archive; `read_session` opens those sessions too.
 
+### Hosts and repositories
+
+Every session records the host it came from and the repository it belongs to, so one
+database can hold several machines and `list_projects` can show one project once.
+
+- **Host.** A label on each session, set once by the first machine to deliver it. It is
+  `CLAUDE_HISTORY_HOST`, else the machine's hostname up to its first dot. Search it with
+  `host:laptop`; `host:unknown` finds sessions indexed before hosts were recorded.
+- **Repository.** The sweep works it out from the first of these that applies:
+  1. the git remote the session itself recorded (Codex does);
+  2. the repository map, a file per machine with one line per directory: the directory,
+     its main repository root and its `origin` URL;
+  3. the remote of another session on the same host that ran in exactly the same directory
+     inside a git work tree;
+  4. worktree folding: `<repo>/.claude/worktrees/<name>` belongs to `<repo>`, and so does
+     `<repo>/.worktrees/<name>` (also `worktrees`; see `CLAUDE_HISTORY_WORKTREE_DIRS`) when
+     `<repo>` is known to be a git work tree;
+  5. the working directory itself.
+
+  A repository with a remote is keyed `host/owner/name` (for example `example.com/acme/app`)
+  and is one repository on every machine. One without a remote is keyed by host and path, so
+  the same path on `laptop` and `desktop` is not taken to be one repository unless a git
+  remote says so.
+- **What runs.** `sweep` asks git about the working directories of the sessions it indexed
+  (`rev-parse` and `remote get-url`, local commands with a 5 second timeout) and appends the
+  answers to `<data dir>/repo-map/<host>.jsonl`. It makes no network call and prompts for
+  nothing; with git missing or outside a repository it records nothing. The query-time
+  top-up never runs git. The map file holds directory paths and remote URLs with any
+  credentials removed. `record-repo` (see Commands) writes the same file.
+- **Map files.** Every `*.jsonl` file under the map directory is read on each sweep and its
+  entries apply to the host doing the sweep. Malformed lines, relative paths and `..` paths
+  are ignored, and a newer entry replaces an older one for the same directory.
+
+Upgrading: the database migrates in place to schema version 4 on the next `sweep`. Sessions
+indexed earlier show host `unknown` and are grouped by directory until you run
+`claude-history-mcp rebuild`.
+
 ## Commands
 
 ```bash
@@ -121,6 +158,7 @@ node dist/index.js status [--json]       # size, sessions, messages, oldest/newe
 node dist/index.js search "<query>" [--limit N] [--project P] [--context] [--sort recent] [--timing] [--no-topup]
 node dist/index.js rebuild [--json]      # build a fresh database beside the old one and swap it in
 node dist/index.js import-legacy         # one-time import from the version 1 index (see below)
+node dist/index.js record-repo [dir]     # note which repository a directory belongs to (default: the current directory); prints nothing
 npm run build-index                      # same as sweep, from the TypeScript sources
 ```
 
@@ -132,6 +170,16 @@ file (`VACUUM`, about 10 s for a large history) after a migration, or once a ten
 messages are new since the last compaction: keeping each table in one place roughly halves
 the time of a search on a cold disk cache. `rebuild` keeps every session whose transcript no longer exists, and swaps the
 new database in with SQLite's online backup, so open servers simply see the new data.
+
+`record-repo` asks local git about one directory and appends the answer to this machine's
+map file. It prints nothing and always exits 0, so it is safe in a `SessionStart` hook:
+
+```json
+{"type": "command", "command": "claude-history-mcp record-repo"}
+```
+
+It helps when a worktree is deleted before the next sweep, which could no longer ask git
+about it.
 
 ### Upgrading from version 1 (index.msgpack)
 
@@ -160,6 +208,10 @@ The old files are left in place; delete them yourself once you are happy.
 | `CLAUDE_HISTORY_PI_SESSIONS_DIR` | `~/.pi/agent/sessions` | Native pi session files |
 | `CODEX_HOME` | `~/.codex` | Codex home |
 | `CLAUDE_HISTORY_TOPUP_MS` | `300` | Query-time indexing budget in ms; `0` turns it off |
+| `CLAUDE_HISTORY_HOST` | hostname up to its first dot | Name of this machine, recorded on each session it indexes first |
+| `CLAUDE_HISTORY_REPO_MAP_DIR` | `<data dir>/repo-map` | Directory of per-machine repository maps (`<host>.jsonl`) |
+| `CLAUDE_HISTORY_REPO_HOST_ALIASES` | none | Git host aliases, `a=b,c=d`: remotes on host `a` count as host `b` (for example `git.internal=example.com`) |
+| `CLAUDE_HISTORY_WORKTREE_DIRS` | `.worktrees,worktrees` | Comma-separated folder names that hold a repository's worktrees; set but empty means none |
 
 ## What Claude Can Do With It
 
@@ -180,7 +232,7 @@ The old files are left in place; delete them yourself once you are happy.
 - `"exact phrase"`, `redis OR memcached`.
 - Identifiers work as typed: `index.msgpack`, `ERR_SQLITE_ERROR`, `src/server.ts`.
 - Filters: `project:` `branch:` `tool:Bash` `role:user|assistant|tool` `source:claude|codex|pi`
-  `session:<id>` `after:7d` `before:2026-01-15` (relative `h/d/w/m/y`, ISO dates, `today`).
+  `host:laptop` (`host:unknown` for sessions indexed before hosts were recorded) `session:<id>` `after:7d` `before:2026-01-15` (relative `h/d/w/m/y`, ISO dates, `today`).
   `session:` takes a session id or prefix: a parent session's id also covers its subagents,
   and `session:agent-<id>` finds that subagent under every parent.
 - Each hit is labelled with its working directory (home shown as `~`), the date, the
