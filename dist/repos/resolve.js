@@ -4,7 +4,7 @@
  * map, the remote of another session that ran at exactly the same directory with git evidence
  * there (an implicit map row), and path patterns for well-known worktree layouts; the working
  * directory itself is the last resort. A session remote seen at another directory ranks below
- * the map: it is used only when no map row names the cwd.
+ * the map and the implicit row: it is used only when neither names the cwd.
  *
  * Every fact but a remote is scoped by host: a path names a directory on one machine, so the
  * same path on two machines is never assumed to be the same repository. A repository with a
@@ -196,9 +196,11 @@ function lookupMap(get, cwd) {
  * The one resolution path, for resolve-on-write and the full pass alike. `get`, `isRepoDir`
  * and `implicit` read the facts of `input.host` only. Precedence: the session's own remote
  * when it was seen at the cwd (cwdGit); the map row for the cwd or its longest ancestor; the
- * session's own remote seen elsewhere; the implicit map row for exactly the cwd (key only);
- * worktree folding; the cwd itself. The root is the map row's when one matches, else the
- * folded cwd; an implicit row never changes it. A map row that wins gives key and root both.
+ * implicit map row for exactly the cwd (key only); the session's own remote seen elsewhere
+ * (key only); worktree folding; the cwd itself. A remote another session saw at this very
+ * directory says more about it than one this session saw only at another directory. The root
+ * is the map row's when one matches, else the folded cwd; neither an implicit row nor a remote
+ * seen elsewhere changes it. A map row that wins gives key and root both.
  */
 function resolveWith(get, isRepoDir, implicit, input, aliases, containers) {
     const cwd = input.cwd ? cleanCwd(input.cwd) : null;
@@ -211,14 +213,12 @@ function resolveWith(get, isRepoDir, implicit, input, aliases, containers) {
         const key = row.remote ? normaliseRemote(row.remote, aliases) : null;
         return key ? remoteRepo(key, row.root) : pathRepo(input.host, row.root);
     }
-    if (own)
-        return remoteRepo(own, root);
-    if (!cwd)
-        return null;
-    const key = implicitKey(implicit(cwd), aliases);
+    const key = cwd ? implicitKey(implicit(cwd), aliases) : null;
     if (key)
         return remoteRepo(key, root);
-    return pathRepo(input.host, root);
+    if (own)
+        return remoteRepo(own, root);
+    return cwd ? pathRepo(input.host, root) : null;
 }
 /** The repository of one session, with its statements prepared once, for callers that resolve many times. */
 export function repoResolver(db) {
@@ -240,11 +240,12 @@ export function repoResolver(db) {
  * Meta key set when a session gives the first git evidence (cwd_git) for its directory on its
  * host, or changes the implicit map row of its directory (a cwd_git session with a remote):
  * the next sweep then runs the full pass, since that directory may now fold worktree
- * sessions, or give a repository key to sessions, resolved before it.
+ * sessions, or give a repository key to sessions resolved before it (those known only by
+ * path, and those whose own remote was seen at another directory).
  */
 export const REPO_NEW_DIR_KEY = "repo_new_dir";
 /** Bumped when the resolution rules change, so stored resolutions are recomputed once. */
-const RESOLVER_REVISION = 1;
+const RESOLVER_REVISION = 2;
 /** What meta `repo_resolved` must hold for the stored resolutions to be current: rules, aliases and container names. */
 export function repoResolvedStamp() {
     const aliases = [...hostAliasesFromEnv()].sort().map(([a, b]) => `${a}=${b}`).join(",");

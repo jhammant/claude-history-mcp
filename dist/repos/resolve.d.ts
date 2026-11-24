@@ -4,7 +4,7 @@
  * map, the remote of another session that ran at exactly the same directory with git evidence
  * there (an implicit map row), and path patterns for well-known worktree layouts; the working
  * directory itself is the last resort. A session remote seen at another directory ranks below
- * the map: it is used only when no map row names the cwd.
+ * the map and the implicit row: it is used only when neither names the cwd.
  *
  * Every fact but a remote is scoped by host: a path names a directory on one machine, so the
  * same path on two machines is never assumed to be the same repository. A repository with a
@@ -79,7 +79,8 @@ export declare function repoResolver(db: DB): (input: ResolveInput) => Repo | nu
  * Meta key set when a session gives the first git evidence (cwd_git) for its directory on its
  * host, or changes the implicit map row of its directory (a cwd_git session with a remote):
  * the next sweep then runs the full pass, since that directory may now fold worktree
- * sessions, or give a repository key to sessions, resolved before it.
+ * sessions, or give a repository key to sessions resolved before it (those known only by
+ * path, and those whose own remote was seen at another directory).
  */
 export declare const REPO_NEW_DIR_KEY = "repo_new_dir";
 /** What meta `repo_resolved` must hold for the stored resolutions to be current: rules, aliases and container names. */
