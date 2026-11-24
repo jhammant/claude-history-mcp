@@ -293,6 +293,12 @@ describe('repositories sharing a name', () => {
     expect(one).toContain('1 project with conversation history matching "team/app":');
     expect(one).toMatch(/^- team\/app — 1 sessions/m);
     expect(matchRepos(corpus.open(), 'team/app')).toEqual(['git.example.com/team/app']);
+    // Both sessions share one cwd, so only the repository match tells them apart.
+    const hits = new SearchEngine(corpus.open()).search('hello', { project: 'team/app' }).hits.map((h) => h.sessionId);
+    expect(hits).toEqual([`codex-0199dddd-0000-7000-8000-000000000001`]);
+    const team = corpus.open().prepare("SELECT DISTINCT project FROM sessions WHERE repo = 'git.example.com/team/app'").pluck().all();
+    expect(team).toHaveLength(1);
+    expect(matchProjects(corpus.open(), 'team/app')).toEqual(team);
     expect(matchRepos(corpus.open(), 'TEAM/app')).toEqual(['git.example.com/team/app']);
   });
 });

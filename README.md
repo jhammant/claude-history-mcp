@@ -148,8 +148,8 @@ database can hold several machines and `list_projects` can show one project once
   apart, else as `owner/name`, the full remote, or `name @host`; a project filter accepts
   `owner/name` too.
   A project filter reaches every directory of the repositories it matches. The exception is
-  a session on the same machine inside another repository's tree, when that repository is
-  known by a remote and the session's own repository root does not match the filter: it
+  a session on the same machine inside another repository's tree, when that repository has
+  a known remote and the session's own repository root does not match the filter: it
   does not bring in the rest of its own repository.
 - **What runs.** `sweep` asks git about the working directories of the sessions it indexed
   and appends the answers to `<host>.jsonl` in the map directory (`CLAUDE_HISTORY_REPO_MAP_DIR`,
