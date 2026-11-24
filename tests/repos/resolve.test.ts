@@ -405,6 +405,12 @@ describe('distinctNames', () => {
     expect(pathKeyHost('hostA:C:\\w\\app')).toBe('hostA');
     expect(pathKeyHost('C:\\w\\app')).toBeNull();
     expect(pathKeyHost('hostA:\\\\srv\\share\\app')).toBe('hostA');
+    // forward slashes: the drive letter is not a host
+    expect(pathKeyHost('pc:C:/w/app')).toBe('pc');
+    expect(pathKeyHost('C:/w/app')).toBeNull();
+    expect(repoName('pc:C:/w/app')).toBe('app');
+    expect(repoName('C:/w/app')).toBe('app');
+    expect(labels(['pc:C:/w/app', 'pd:C:/w/app'])).toEqual({ 'pc:C:/w/app': 'app @pc', 'pd:C:/w/app': 'app @pd' });
     // a remote with a port is still a remote
     expect(pathKeyHost('example.com:8080/acme/tools')).toBeNull();
     expect(labels(['example.com:8080/acme/tools', 'other.example.com/acme/tools'])).toEqual({

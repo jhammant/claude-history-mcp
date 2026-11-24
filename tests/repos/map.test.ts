@@ -112,11 +112,18 @@ describe('loadRepoMaps', () => {
     expect(loadRepoMaps(db, meta(), 'laptop').changed).toBe(true);
     expect(loadRepoMaps(db, meta(), 'laptop').changed).toBe(false);
 
-    put('boxa.jsonl', [line({ dir: '/w/a', root: '/w/other', remote: null, at: 10 })]);
+    // equal at with the same value is ignored
+    put('boxa.jsonl', [line({ dir: '/w/a', root: '/w/a', remote: null, at: 10 })]);
     expect(loadRepoMaps(db, meta(), 'laptop').changed).toBe(false);
     put('boxa.jsonl', [line({ dir: '/w/a', root: '/w/older', remote: null, at: 9 })]);
     expect(loadRepoMaps(db, meta(), 'laptop').changed).toBe(false);
     expect(rows(db)).toEqual([{ dir: '/w/a', root: '/w/a', remote: null, at: 10 }]);
+
+    // equal at with a different value wins (a change within the same second)
+    put('boxa.jsonl', [line({ dir: '/w/a', root: '/w/other', remote: null, at: 10 })]);
+    expect(loadRepoMaps(db, meta(), 'laptop').changed).toBe(true);
+    expect(rows(db)).toEqual([{ dir: '/w/a', root: '/w/other', remote: null, at: 10 }]);
+    expect(loadRepoMaps(db, meta(), 'laptop').changed).toBe(false);
 
     put('boxa.jsonl', [line({ dir: '/w/a', root: '/w/new', remote: null, at: 11 })]);
     expect(loadRepoMaps(db, meta(), 'laptop').changed).toBe(true);
@@ -130,6 +137,32 @@ describe('loadRepoMaps', () => {
     ]);
     loadRepoMaps(db, meta(), 'laptop');
     expect(rows(db)).toEqual([{ dir: '/w/a', root: '/w/second', remote: null, at: 10 }]);
+  });
+
+  it('reports no change when the same file holding a same-second pair is loaded again', () => {
+    put('boxa.jsonl', [
+      line({ dir: '/w/a', root: '/w/a', remote: null, at: 10 }),
+      line({ dir: '/w/a', root: '/w/b', remote: null, at: 10 }),
+    ]);
+    expect(loadRepoMaps(db, meta(), 'laptop').changed).toBe(true);
+    expect(loadRepoMaps(db, meta(), 'laptop').changed).toBe(false);
+    expect(loadRepoMaps(db, meta(), 'laptop').changed).toBe(false);
+    expect(rows(db)).toEqual([{ dir: '/w/a', root: '/w/b', remote: null, at: 10 }]);
+  });
+
+  it('repairs a database holding the earlier line of a same-second pair', () => {
+    put('boxa.jsonl', [line({ dir: '/w/a', root: '/w/a', remote: 'https://example.com/o/a.git', at: 10 })]);
+    loadRepoMaps(db, meta(), 'laptop');
+    put('boxa.jsonl', [
+      line({ dir: '/w/a', root: '/w/a', remote: 'https://example.com/o/a.git', at: 10 }),
+      line({ dir: '/w/a', root: '/w/a', remote: 'https://example.com/o/b.git', at: 10 }),
+    ]);
+    expect(loadRepoMaps(db, meta(), 'laptop').changed).toBe(true);
+    expect(rows(db)).toEqual([{ dir: '/w/a', root: '/w/a', remote: 'https://example.com/o/b.git', at: 10 }]);
+    // and a remote dropped within the same second (NULL-safe comparison)
+    put('boxa.jsonl', [line({ dir: '/w/a', root: '/w/a', remote: null, at: 10 })]);
+    expect(loadRepoMaps(db, meta(), 'laptop').changed).toBe(true);
+    expect(rows(db)).toEqual([{ dir: '/w/a', root: '/w/a', remote: null, at: 10 }]);
   });
 
   it('merges files from several machines and nested directories, newest line winning', () => {

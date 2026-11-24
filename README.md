@@ -131,11 +131,11 @@ database can hold several machines and `list_projects` can show one project once
      applies, or else the row for the nearest parent directory that has one; it gives both
      the key and the root, and a row with no usable remote gives a key by host and path;
   3. the remote of another session on the same host that ran in exactly the same directory
-     and saw git there, with no map row for the session's directory. It gives the key only:
+     and saw git there, with no map row for the directory or a parent. It gives the key only:
      the root is the one steps 5 and 6 give;
   4. the session's own remote when it was recorded for another directory (a Codex session
      whose first activity was outside the directory its header names), with neither a map
-     row nor such a remote for the session's directory; again the key only;
+     row for the directory or a parent nor such a remote for the directory; again the key only;
   5. worktree folding: `<repo>/.claude/worktrees/<name>` belongs to `<repo>`, and so does
      `<repo>/.worktrees/<name>` (also `worktrees`; see `CLAUDE_HISTORY_WORKTREE_DIRS`) when
      `<repo>` is known to be a git work tree;

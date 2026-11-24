@@ -8,6 +8,7 @@ import { execFileSync } from "child_process";
 import { appendFileSync, chmodSync, mkdirSync, readFileSync, realpathSync } from "fs";
 import { basename, dirname, isAbsolute, join, resolve } from "path";
 import { CONFIG } from "../config.js";
+import { canonicalRemote, parseLine } from "./map.js";
 import { stripRemoteCredentials } from "./url.js";
 
 export interface MapEntry {
@@ -60,7 +61,8 @@ function tryRealpath(path: string): string | null {
  */
 export function probeRepo(dir: string): MapEntry[] {
   // No stat first: on a dead network mount it could block with no timeout. Git fails fast for a
-  // missing directory or a file, and its calls are the only ones that wait, each with a timeout.
+  // missing directory or a file. Each git call has a timeout that signals the child; a mount that
+  // is hard-hung can still hold the process longer.
   // An empty path is refused here because `git -C ""` is a no-op and would probe the process's own directory.
   if (!dir) return [];
   const top = git(["-C", dir, "rev-parse", "--show-toplevel"]);
@@ -98,12 +100,13 @@ function logicalTop(dir: string, top: string): string | null {
 
 /** What a map line says about its directory: root and remote, as compared before appending. */
 function value(root: string, remote: string | null): string {
-  return JSON.stringify([root, remote]);
+  // The remote as the loader will store it, so a line the loader cannot recognise is not appended again each probe.
+  return JSON.stringify([root, remote === null ? null : canonicalRemote(remote)]);
 }
 
 /**
- * The newest line per directory already in the file, as the loader picks it (the highest `at`;
- * on a tie the later line). Unparseable lines, and lines without a numeric `at`, are ignored.
+ * The newest line per directory already in the file, as the loader picks it: the lines the
+ * loader accepts (`parseLine`), the highest `at`, and on a tie the later line.
  */
 function newestLines(file: string): Map<string, { value: string; at: number }> {
   const newest = new Map<string, { value: string; at: number }>();
@@ -113,20 +116,13 @@ function newestLines(file: string): Map<string, { value: string; at: number }> {
   } catch {
     return newest;
   }
+  const nowSeconds = Date.now() / 1000;
   for (const line of text.split("\n")) {
     if (!line.trim()) continue;
-    try {
-      const o = JSON.parse(line) as Record<string, unknown>;
-      if (o && typeof o === "object" && typeof o.dir === "string" && typeof o.root === "string" &&
-          typeof o.at === "number" && Number.isFinite(o.at)) {
-        const prior = newest.get(o.dir);
-        if (!prior || o.at >= prior.at) {
-          newest.set(o.dir, { value: value(o.root, typeof o.remote === "string" && o.remote ? o.remote : null), at: o.at });
-        }
-      }
-    } catch {
-      // corrupt line
-    }
+    const entry = parseLine(line, nowSeconds);
+    if (!entry) continue;
+    const prior = newest.get(entry.dir);
+    if (!prior || entry.at >= prior.at) newest.set(entry.dir, { value: value(entry.root, entry.remote), at: entry.at });
   }
   return newest;
 }
@@ -152,12 +148,9 @@ export function recordRepos(dirs: Iterable<string>, options: { mapDir?: string; 
         const v = value(entry.root, entry.remote);
         const prior = newest.get(entry.dir);
         if (prior && prior.value === v) continue;
-        // A changed value is stamped after the line it replaces, so a tie in time can never hide it
-        // (a loader that has stored the earlier line only accepts a strictly newer one).
-        const stamp = prior && prior.at >= at ? prior.at + 1 : at;
-        appendFileSync(file, JSON.stringify({ dir: entry.dir, root: entry.root, remote: entry.remote, at: stamp }) + "\n", { mode: 0o600 });
+        appendFileSync(file, JSON.stringify({ dir: entry.dir, root: entry.root, remote: entry.remote, at }) + "\n", { mode: 0o600 });
         chmodSync(file, 0o600);
-        newest.set(entry.dir, { value: v, at: stamp });
+        newest.set(entry.dir, { value: v, at });
         added++;
       }
     }

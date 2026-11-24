@@ -4,6 +4,16 @@
  * its main repository root and origin URL. The files are untrusted input.
  */
 import type { DB } from "../db/database.js";
+export interface Entry {
+    dir: string;
+    root: string;
+    remote: string | null;
+    at: number;
+}
+/** The remote as the map stores it: credentials stripped, and null when it is not a recognisable remote. */
+export declare function canonicalRemote(raw: string): string | null;
+/** One map line as the loader accepts it, or null. The probe reads its own file through this too. */
+export declare function parseLine(text: string, nowSeconds: number): Entry | null;
 /**
  * Read the map files in mapDir, store each entry under `host`, and upsert entries with a newer
  * `at`. `changed` is true when a row was written. By default every `*.jsonl` file below mapDir is

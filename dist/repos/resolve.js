@@ -78,14 +78,15 @@ function repoEvidence(source) {
     return (dir) => source.mapped(dir) || source.gitSession(dir);
 }
 function keyParts(key) {
-    const path = /^([^/]*):(?=\/)/.exec(key);
+    // A bare Windows drive path first: `C:/w/app` is not host `C` with a POSIX path.
+    if (/^[A-Za-z]:[\\/]/.test(key))
+        return { remote: false, host: "" };
+    const path = /^([^/:]*):(?=\/)/.exec(key);
     if (path)
         return { remote: false, host: path[1] };
     if (key.startsWith("/"))
         return { remote: false, host: "" };
-    // A Windows path (drive path, or anything with a backslash; a remote never has one), after an optional `<host>:`.
-    if (/^[A-Za-z]:\\/.test(key))
-        return { remote: false, host: "" };
+    // A host-prefixed Windows path (drive path, or anything with a backslash; a remote never has one).
     const windows = /^([^/\\:]+):(?=[A-Za-z]:[\\/]|.*\\)/.exec(key);
     if (windows)
         return { remote: false, host: windows[1] };

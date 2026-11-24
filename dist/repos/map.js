@@ -28,7 +28,13 @@ function cleanPath(value) {
     const trimmed = value.replace(/\/+$/, "");
     return trimmed || null;
 }
-function parseLine(text, nowSeconds) {
+/** The remote as the map stores it: credentials stripped, and null when it is not a recognisable remote. */
+export function canonicalRemote(raw) {
+    const stripped = stripRemoteCredentials(raw);
+    return normaliseRemote(stripped, new Map()) ? stripped : null;
+}
+/** One map line as the loader accepts it, or null. The probe reads its own file through this too. */
+export function parseLine(text, nowSeconds) {
     let obj;
     try {
         obj = JSON.parse(text);
@@ -46,10 +52,8 @@ function parseLine(text, nowSeconds) {
     if (typeof o.at !== "number" || !Number.isFinite(o.at) || o.at < 0 || o.at > nowSeconds + MAX_FUTURE_SECONDS)
         return null;
     let remote = null;
-    if (typeof o.remote === "string") {
-        const stripped = stripRemoteCredentials(o.remote);
-        remote = normaliseRemote(stripped, new Map()) ? stripped : null;
-    }
+    if (typeof o.remote === "string")
+        remote = canonicalRemote(o.remote);
     return { dir, root, remote, at: Math.floor(o.at) };
 }
 /** Regular `*.jsonl` files (symlinks are not followed), at most MAX_FILES. */
@@ -137,7 +141,8 @@ export function loadRepoMaps(db, mapDir, host, options = {}) {
         return { files, entries, changed: false };
     const upsert = db.prepare(`INSERT INTO repo_map(host, dir, root, remote, at) VALUES (@host, @dir, @root, @remote, @at)
      ON CONFLICT(host, dir) DO UPDATE SET root = excluded.root, remote = excluded.remote, at = excluded.at
-     WHERE excluded.at > repo_map.at`);
+     WHERE excluded.at > repo_map.at
+        OR (excluded.at = repo_map.at AND (excluded.root IS NOT repo_map.root OR excluded.remote IS NOT repo_map.remote))`);
     const changes = db.transaction(() => {
         let n = 0;
         for (const entry of newest.values())

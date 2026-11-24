@@ -23,7 +23,7 @@ function warnOnce(key: string, message: string): void {
   console.error(`claude-history: ${message}`);
 }
 
-interface Entry {
+export interface Entry {
   dir: string;
   root: string;
   remote: string | null;
@@ -38,7 +38,14 @@ function cleanPath(value: unknown): string | null {
   return trimmed || null;
 }
 
-function parseLine(text: string, nowSeconds: number): Entry | null {
+/** The remote as the map stores it: credentials stripped, and null when it is not a recognisable remote. */
+export function canonicalRemote(raw: string): string | null {
+  const stripped = stripRemoteCredentials(raw);
+  return normaliseRemote(stripped, new Map()) ? stripped : null;
+}
+
+/** One map line as the loader accepts it, or null. The probe reads its own file through this too. */
+export function parseLine(text: string, nowSeconds: number): Entry | null {
   let obj: unknown;
   try {
     obj = JSON.parse(text);
@@ -52,10 +59,7 @@ function parseLine(text: string, nowSeconds: number): Entry | null {
   if (!dir || !root) return null;
   if (typeof o.at !== "number" || !Number.isFinite(o.at) || o.at < 0 || o.at > nowSeconds + MAX_FUTURE_SECONDS) return null;
   let remote: string | null = null;
-  if (typeof o.remote === "string") {
-    const stripped = stripRemoteCredentials(o.remote);
-    remote = normaliseRemote(stripped, new Map()) ? stripped : null;
-  }
+  if (typeof o.remote === "string") remote = canonicalRemote(o.remote);
   return { dir, root, remote, at: Math.floor(o.at) };
 }
 
@@ -138,7 +142,8 @@ export function loadRepoMaps(
   const upsert = db.prepare(
     `INSERT INTO repo_map(host, dir, root, remote, at) VALUES (@host, @dir, @root, @remote, @at)
      ON CONFLICT(host, dir) DO UPDATE SET root = excluded.root, remote = excluded.remote, at = excluded.at
-     WHERE excluded.at > repo_map.at`
+     WHERE excluded.at > repo_map.at
+        OR (excluded.at = repo_map.at AND (excluded.root IS NOT repo_map.root OR excluded.remote IS NOT repo_map.remote))`
   );
   const changes = db.transaction(() => {
     let n = 0;

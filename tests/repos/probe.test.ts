@@ -10,6 +10,9 @@ import { probeRepo, recordRepos } from "../../src/repos/probe.js";
 
 const hasGit = spawnSync("git", ["--version"]).status === 0;
 
+// Line times must be ones the loader accepts (not far in the future).
+const T0 = Math.floor(Date.now() / 1000) - 10_000;
+
 const GIT_ENV = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
 
 function git(cwd: string, ...args: string[]): void {
@@ -124,14 +127,14 @@ describe.skipIf(!hasGit)("git probe", () => {
 
   it("appends a line once", () => {
     git(repo, "remote", "add", "origin", "https://user:tok@example.com/acme/app.git");
-    expect(recordRepos([repo], { mapDir, host: "laptop", now: 1_800_000_000 })).toBe(1);
-    expect(recordRepos([repo], { mapDir, host: "laptop", now: 1_800_000_500 })).toBe(0);
+    expect(recordRepos([repo], { mapDir, host: "laptop", now: T0 })).toBe(1);
+    expect(recordRepos([repo], { mapDir, host: "laptop", now: T0 + 500 })).toBe(0);
     const file = join(mapDir, "laptop.jsonl");
     expect(statSync(file).mode & 0o777).toBe(0o600);
     expect(statSync(mapDir).mode & 0o777).toBe(0o700);
     const text = readFileSync(file, "utf8");
     expect(text).not.toContain("tok");
-    expect(JSON.parse(text.trim())).toEqual({ dir: repo, root: repo, remote: "https://example.com/acme/app.git", at: 1_800_000_000 });
+    expect(JSON.parse(text.trim())).toEqual({ dir: repo, root: repo, remote: "https://example.com/acme/app.git", at: T0 });
   });
 
   it("compares against the newest line for the directory: a remote changed back appends again", () => {
@@ -141,14 +144,14 @@ describe.skipIf(!hasGit)("git probe", () => {
       return lines.reduce((a, b) => (b.at > a.at ? b : a)).remote;
     };
     git(repo, "remote", "add", "origin", "https://example.com/acme/a.git");
-    expect(recordRepos([repo], { mapDir, host: "laptop", now: 1_800_000_001 })).toBe(1);
+    expect(recordRepos([repo], { mapDir, host: "laptop", now: T0 + 1 })).toBe(1);
     git(repo, "remote", "set-url", "origin", "https://example.com/acme/b.git");
-    expect(recordRepos([repo], { mapDir, host: "laptop", now: 1_800_000_002 })).toBe(1);
+    expect(recordRepos([repo], { mapDir, host: "laptop", now: T0 + 2 })).toBe(1);
     expect(newest()).toBe("https://example.com/acme/b.git");
     git(repo, "remote", "set-url", "origin", "https://example.com/acme/a.git");
-    expect(recordRepos([repo], { mapDir, host: "laptop", now: 1_800_000_003 })).toBe(1);
+    expect(recordRepos([repo], { mapDir, host: "laptop", now: T0 + 3 })).toBe(1);
     expect(newest()).toBe("https://example.com/acme/a.git");
-    expect(recordRepos([repo], { mapDir, host: "laptop", now: 1_800_000_004 })).toBe(0);
+    expect(recordRepos([repo], { mapDir, host: "laptop", now: T0 + 4 })).toBe(0);
     expect(readFileSync(file, "utf8").trim().split("\n")).toHaveLength(3);
   });
 
@@ -172,10 +175,36 @@ describe.skipIf(!hasGit)("git probe", () => {
     }
   });
 
+  it("a future-dated line in the file does not stop a later change reaching the database", () => {
+    const dbDir = join(tmp, "db2");
+    mkdirSync(dbDir);
+    const db = openDatabase(join(dbDir, "history.db"), { create: true });
+    const now = Math.floor(Date.now() / 1000);
+    try {
+      mkdirSync(mapDir, { recursive: true });
+      const file = join(mapDir, "laptop.jsonl");
+      writeFileSync(file, JSON.stringify({ dir: repo, root: repo, remote: null, at: now + 30 * 86400 }) + "\n");
+      git(repo, "remote", "add", "origin", "https://example.com/acme/a.git");
+      expect(recordRepos([repo], { mapDir, host: "laptop", now })).toBe(1);
+      git(repo, "remote", "set-url", "origin", "https://example.com/acme/b.git");
+      expect(recordRepos([repo], { mapDir, host: "laptop", now: now + 5 })).toBe(1);
+      loadRepoMaps(db, mapDir, "laptop", { file: "laptop.jsonl" });
+      expect(db.prepare("SELECT remote FROM repo_map WHERE dir = ?").pluck().get(repo)).toBe("https://example.com/acme/b.git");
+    } finally {
+      db.close();
+    }
+  });
+
+  it("does not re-append a remote the loader cannot recognise", () => {
+    git(repo, "remote", "add", "origin", "/srv/local/clone.git");
+    expect(recordRepos([repo], { mapDir, host: "laptop", now: T0 })).toBe(1);
+    expect(recordRepos([repo], { mapDir, host: "laptop", now: T0 + 100 })).toBe(0);
+  });
+
   it("keeps the mode of a map directory that already exists, and still writes the file 0600", () => {
     mkdirSync(mapDir, { mode: 0o755 });
     chmodSync(mapDir, 0o755);
-    expect(recordRepos([repo], { mapDir, host: "laptop", now: 1_800_000_000 })).toBe(1);
+    expect(recordRepos([repo], { mapDir, host: "laptop", now: T0 })).toBe(1);
     expect(statSync(mapDir).mode & 0o777).toBe(0o755);
     expect(statSync(join(mapDir, "laptop.jsonl")).mode & 0o777).toBe(0o600);
   });
@@ -184,8 +213,8 @@ describe.skipIf(!hasGit)("git probe", () => {
     mkdirSync(mapDir, { recursive: true });
     const file = join(mapDir, "laptop.jsonl");
     writeFileSync(file, "not json\n{\"dir\":1}\n");
-    expect(recordRepos([repo], { mapDir, host: "laptop", now: 1_800_000_000 })).toBe(1);
-    expect(recordRepos([repo], { mapDir, host: "laptop", now: 1_800_000_000 })).toBe(0);
+    expect(recordRepos([repo], { mapDir, host: "laptop", now: T0 })).toBe(1);
+    expect(recordRepos([repo], { mapDir, host: "laptop", now: T0 })).toBe(0);
     const lines = readFileSync(file, "utf8").trim().split("\n");
     expect(lines).toHaveLength(3);
     expect(JSON.parse(lines[2]).dir).toBe(repo);
