@@ -1,5 +1,5 @@
 import { spawnSync } from "child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -90,6 +90,32 @@ describe.skipIf(!hasGit)("git probe", () => {
     const text = readFileSync(file, "utf8");
     expect(text).not.toContain("tok");
     expect(JSON.parse(text.trim())).toEqual({ dir: repo, root: repo, remote: "https://example.com/acme/app.git", at: 1_800_000_000 });
+  });
+
+  it("compares against the newest line for the directory: a remote changed back appends again", () => {
+    const file = join(mapDir, "laptop.jsonl");
+    const newest = () => {
+      const lines = readFileSync(file, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+      return lines.reduce((a, b) => (b.at > a.at ? b : a)).remote;
+    };
+    git(repo, "remote", "add", "origin", "https://example.com/acme/a.git");
+    expect(recordRepos([repo], { mapDir, host: "laptop", now: 1_800_000_001 })).toBe(1);
+    git(repo, "remote", "set-url", "origin", "https://example.com/acme/b.git");
+    expect(recordRepos([repo], { mapDir, host: "laptop", now: 1_800_000_002 })).toBe(1);
+    expect(newest()).toBe("https://example.com/acme/b.git");
+    git(repo, "remote", "set-url", "origin", "https://example.com/acme/a.git");
+    expect(recordRepos([repo], { mapDir, host: "laptop", now: 1_800_000_003 })).toBe(1);
+    expect(newest()).toBe("https://example.com/acme/a.git");
+    expect(recordRepos([repo], { mapDir, host: "laptop", now: 1_800_000_004 })).toBe(0);
+    expect(readFileSync(file, "utf8").trim().split("\n")).toHaveLength(3);
+  });
+
+  it("keeps the mode of a map directory that already exists, and still writes the file 0600", () => {
+    mkdirSync(mapDir, { mode: 0o755 });
+    chmodSync(mapDir, 0o755);
+    expect(recordRepos([repo], { mapDir, host: "laptop", now: 1_800_000_000 })).toBe(1);
+    expect(statSync(mapDir).mode & 0o777).toBe(0o755);
+    expect(statSync(join(mapDir, "laptop.jsonl")).mode & 0o777).toBe(0o600);
   });
 
   it("ignores a corrupt line already in the file", () => {
