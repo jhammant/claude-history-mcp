@@ -23,6 +23,11 @@ export interface TranscriptFormat {
      * already owns (the first indexed keeps it; this one is skipped with one log line).
      */
     firstFileWins?: boolean;
+    /**
+     * True when user and assistant lines carry a `uuid` that names the line wherever it is
+     * copied (Claude): each is indexed at most once across the database (indexing/line-keys.ts).
+     */
+    uuidLines?: boolean;
     /** Cheap check on the raw bytes of a line of at least BIG_LINE bytes. */
     isMessageLine(head: string): boolean;
     /** One per file read; `resumed` is true when reading starts past offset 0. */

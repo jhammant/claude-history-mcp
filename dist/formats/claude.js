@@ -41,6 +41,7 @@ export const claudeFormat = {
     source: "claude",
     root: () => CONFIG.projectsDir,
     projectFromContent: false,
+    uuidLines: true,
     list(root, options) {
         const includeSubagents = options.includeSubagentsOf ?? (() => true);
         const out = [];

@@ -11,7 +11,9 @@ import { existsSync, rmSync } from "fs";
 import { openDatabase } from "../db/database.js";
 import { scopeOf } from "../db/schema.js";
 import { acquireLock, releaseLock, sweep, SweepBusyError } from "./sweep.js";
-const SESSION_COLUMNS = "id, project, cwd, git_branch, source, is_subagent, parent_session, title, first_prompt, start_time, end_time, message_count, legacy";
+/** Every sessions column but sid (v3: index_rev, context_copied). */
+const SESSION_COLUMNS = "id, project, cwd, git_branch, source, is_subagent, parent_session, title, first_prompt, start_time, end_time, message_count, legacy, " +
+    "index_rev, context_copied";
 function carryArchive(fresh, oldPath) {
     fresh.prepare("ATTACH DATABASE ? AS old").run(oldPath);
     try {
@@ -24,9 +26,14 @@ function carryArchive(fresh, oldPath) {
        FROM old.messages m JOIN old.message_text t ON t.id = m.id WHERE m.session_sid = ? ORDER BY m.seq`);
         const insertMessage = fresh.prepare("INSERT INTO main.messages(session_sid, seq, role, ts, tools) VALUES (?, ?, ?, ?, ?)");
         const insertText = fresh.prepare("INSERT INTO main.message_text(id, prose, tool_input, tool_output, scope) VALUES (?, ?, ?, ?, ?)");
+        // Their lines' uuids, so a transcript that copied those lines does not add them again.
+        const copyUuids = fresh.prepare("INSERT OR IGNORE INTO main.line_uuids(uuid, session_sid) SELECT uuid, ? FROM old.line_uuids WHERE session_sid = ?");
+        const countUuids = fresh.prepare("SELECT count(*) FROM old.line_uuids WHERE session_sid = ?").pluck();
+        let sharedLines = 0;
         for (const { sid } of missing) {
             fresh.transaction(() => {
                 const newSid = Number(copySession.run(sid).lastInsertRowid);
+                sharedLines += countUuids.get(sid) - copyUuids.run(newSid, sid).changes;
                 // The FTS scope names the session's id in this database, so each row is rewritten.
                 for (const row of oldMessages.all(sid)) {
                     const id = insertMessage.run(newSid, row.seq, row.role, row.ts, row.tools).lastInsertRowid;
@@ -41,7 +48,7 @@ function carryArchive(fresh, oldPath) {
          SELECT type, project, session_id, ts, summary, details, tags, related_files FROM old.knowledge`);
             fresh.exec("INSERT OR IGNORE INTO main.meta SELECT * FROM old.meta WHERE key LIKE 'legacy_%'");
         })();
-        return { sessions: missing.length, messages };
+        return { sessions: missing.length, messages, sharedLines };
     }
     finally {
         fresh.exec("DETACH DATABASE old");
@@ -63,12 +70,17 @@ export async function rebuild(livePath, progress) {
         const fresh = openDatabase(tempPath, { create: true });
         try {
             progress?.("Indexing every transcript into a fresh database…");
-            const stats = sweep(fresh, { progress });
-            const carried = live ? carryArchive(fresh, livePath) : { sessions: 0, messages: 0 };
+            // An exact tie in the indexing order (line-keys.ts) keeps the owner the live database had.
+            const held = live?.prepare("SELECT s.id FROM line_uuids u JOIN sessions s ON s.sid = u.session_sid WHERE u.uuid = ?").pluck();
+            const lineHolder = held ? (key) => held.get(key) : undefined;
+            const stats = sweep(fresh, { progress, lineHolder });
+            const carried = live ? carryArchive(fresh, livePath) : { sessions: 0, messages: 0, sharedLines: 0 };
             fresh.pragma("wal_checkpoint(TRUNCATE)");
             progress?.("Swapping it in…");
             await fresh.backup(livePath);
-            return { sweep: stats, carriedSessions: carried.sessions, carriedMessages: carried.messages };
+            return {
+                sweep: stats, carriedSessions: carried.sessions, carriedMessages: carried.messages, carriedSharedLines: carried.sharedLines,
+            };
         }
         finally {
             fresh.close();

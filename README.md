@@ -88,6 +88,16 @@ the last run, up to the last complete line. A file that shrank or was replaced i
 again from the start. Two indexers working on one file at once cannot insert anything
 twice: each batch re-checks the stored offset inside its write transaction.
 
+**Each Claude line once.** Claude Code copies a session's history into the file of a session
+it forks, and the same session file can sit under two spellings of one project path (a
+directory reached through two paths). Every user and assistant line has a `uuid`; the database records each
+one it has indexed and skips a line it already holds, so a search finds that text once, in
+the session that had it first. The sweep reads files in a fixed order (the oldest first) so
+a sweep and a rebuild agree on which session that is. The skipped lines are counted in the
+sweep's output. A fork keeps its own first prompt and times; where it ran (working directory
+and branch) is taken from the lines it copied only if its own lines do not say. Upgrading
+from version 2 keeps what is already indexed; run `rebuild` once to record every uuid.
+
 **Nothing runs in the background.** There is no daemon, watcher or timer. Freshness comes
 from the scheduled sweep, plus a short top-up a server may do before a search (transcripts
 changed since the last sweep, newest first, within about 300 ms, at most every 20 seconds).

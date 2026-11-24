@@ -51,6 +51,7 @@ export const claudeFormat: TranscriptFormat = {
   source: "claude",
   root: () => CONFIG.projectsDir,
   projectFromContent: false,
+  uuidLines: true,
   list(root: string, options: ListOptions): TranscriptFile[] {
     const includeSubagents = options.includeSubagentsOf ?? (() => true);
     const out: TranscriptFile[] = [];

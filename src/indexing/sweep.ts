@@ -11,7 +11,8 @@ import { replaceSessionKnowledge } from "../knowledge/knowledge-store.js";
 import { loadParsedSession } from "../knowledge/parsed-session.js";
 import { saveSummary, summarizeSession } from "../knowledge/session-summarizer.js";
 import { listSubagentFiles, listTranscripts, type TranscriptFile } from "../parsers/transcript-files.js";
-import { hasChanged, indexFile } from "./indexer.js";
+import { hasChanged, indexFile, noDuplicates, type DuplicateLines } from "./indexer.js";
+import { indexingOrder, type LineHolder } from "./line-keys.js";
 
 /** Run FTS5 'optimize' once this many messages have been added since the last one. */
 const OPTIMIZE_AFTER_MESSAGES = 50_000;
@@ -35,12 +36,12 @@ function knownFiles(db: DB): Map<string, FileState> {
 }
 
 /** Transcripts whose size, mtime or inode differ from what was last indexed. */
-export function changedTranscripts(db: DB): { all: number; changed: TranscriptFile[] } {
+export function changedTranscripts(db: DB): { all: number; changed: TranscriptFile[]; files: TranscriptFile[] } {
   const known = knownFiles(db);
   const files = listTranscripts();
   const changed = files.filter((f) => hasChanged(f, known.get(f.path)));
   changed.sort((a, b) => b.mtimeMs - a.mtimeMs);
-  return { all: files.length, changed };
+  return { all: files.length, changed, files };
 }
 
 // ---------------------------------------------------------------- locking
@@ -101,12 +102,19 @@ export interface SweepStats {
   sessions: number;
   messages: number;
   databaseBytes: number;
+  /** Claude lines skipped because their uuid was already indexed, by class. */
+  duplicates: DuplicateLines;
   ms: number;
 }
 
 export interface SweepOptions {
   /** Called with a short progress line now and then (for a terminal). */
   progress?: (line: string) => void;
+  /**
+   * Which session holds a Claude line now, to break exact ties in the indexing order (rebuild
+   * passes the database it replaces, so a tie keeps its owner). See line-keys.ts.
+   */
+  lineHolder?: LineHolder;
 }
 
 function databaseBytes(db: DB): number {
@@ -172,15 +180,27 @@ export function sweep(db: DB, options: SweepOptions = {}): SweepStats {
   const holder = acquireLock(db, "sweep");
   if (holder) throw new SweepBusyError(holder);
   try {
-    const { all, changed } = changedTranscripts(db);
+    const { all, changed, files } = changedTranscripts(db);
     const stats: SweepStats = {
       transcripts: all, changed: changed.length, indexed: 0, reset: 0, raced: 0, vanished: 0, messagesAdded: 0,
       bytesRead: 0, summarized: 0, optimized: false, vacuumed: false, sessions: 0, messages: 0, databaseBytes: 0, ms: 0,
+      duplicates: noDuplicates(),
     };
     const touched = new Set<number>();
     let lastReport = Date.now();
-    changed.forEach((file, i) => {
+    // Claude files in a fixed order (line-keys.ts, indexingOrder): the session that existed first
+    // keeps the lines a later fork copied, in every sweep and in a rebuild alike, unless the fork
+    // was indexed in an earlier run (a top-up, or an original pushed later).
+    const queue = indexingOrder(changed, options.lineHolder);
+    /** Paths still to read in this sweep. */
+    const pending = new Set(queue.map((f) => f.path));
+    const byPath = new Map(files.map((f) => [f.path, f]));
+    const otherFiles = db.prepare("SELECT path FROM files WHERE session_sid = ? AND path <> ? ORDER BY path").pluck();
+    for (let i = 0; i < queue.length; i++) {
+      const file = queue[i];
+      pending.delete(file.path);
       const result = indexFile(db, file);
+      for (const k of Object.keys(stats.duplicates) as Array<keyof DuplicateLines>) stats.duplicates[k] += result.duplicates[k];
       if (result.status === "indexed") stats.indexed++;
       if (result.status === "raced") stats.raced++;
       if (result.status === "missing") stats.vanished++;
@@ -188,11 +208,22 @@ export function sweep(db: DB, options: SweepOptions = {}): SweepStats {
       stats.messagesAdded += result.messagesAdded;
       stats.bytesRead += result.bytesRead;
       if (result.sessionSid !== undefined && (result.messagesAdded > 0 || result.reset)) touched.add(result.sessionSid);
+      // A session read again from scratch: its other files (a twin under another project path)
+      // were set back to their start, so they are read in this sweep too, not the next.
+      if (result.reset && result.sessionSid !== undefined) {
+        for (const path of otherFiles.all(result.sessionSid, file.path) as string[]) {
+          const other = byPath.get(path);
+          if (other && !pending.has(path)) {
+            pending.add(path);
+            queue.push(other);
+          }
+        }
+      }
       if (options.progress && Date.now() - lastReport > 5_000) {
         lastReport = Date.now();
-        options.progress(`  ${i + 1}/${changed.length} transcripts, ${stats.messagesAdded.toLocaleString("en-US")} messages added`);
+        options.progress(`  ${i + 1}/${queue.length} transcripts, ${stats.messagesAdded.toLocaleString("en-US")} messages added`);
       }
-    });
+    }
 
     stats.summarized = refreshKnowledge(db, touched);
 

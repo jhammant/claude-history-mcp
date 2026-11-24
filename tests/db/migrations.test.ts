@@ -87,7 +87,7 @@ describe('schema migrations', () => {
              INSERT INTO files(path, session_sid, size, mtime, ino) VALUES ('/x.jsonl', 2, 1, 1, 1);`);
 
     // Act
-    const applied = migrate(db);
+    const applied = migrate(db, MIGRATIONS.slice(0, 2));
 
     // Assert
     expect(applied).toEqual([2]);

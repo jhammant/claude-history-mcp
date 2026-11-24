@@ -51,11 +51,22 @@ function progressWriter(): ((line: string) => void) | undefined {
   return process.stderr.isTTY ? (line) => process.stderr.write(line + "\n") : undefined;
 }
 
+/** Claude lines skipped as already indexed, when there were any. */
+function duplicateLine(stats: SweepStats): string {
+  const d = stats.duplicates;
+  const total = d.sameSession + d.otherSession + d.beforeUpgrade;
+  if (!total) return "";
+  const parts = [d.sameSession && `${n(d.sameSession)} from a copy of the same session`, d.otherSession && `${n(d.otherSession)} held by another session`,
+    d.beforeUpgrade && `${n(d.beforeUpgrade)} indexed before the upgrade`].filter(Boolean);
+  return `; ${n(total)} copied lines skipped (${parts.join(", ")})`;
+}
+
 function sweepLine(stats: SweepStats): string {
   const changed = stats.changed === 0
     ? "Nothing changed"
     : `Indexed ${n(stats.indexed)} of ${n(stats.changed)} changed transcripts (+${n(stats.messagesAdded)} messages` +
-      `${stats.reset ? `, ${stats.reset} re-read from scratch` : ""}${stats.raced ? `, ${stats.raced} left to another indexer` : ""})`;
+      `${stats.reset ? `, ${stats.reset} re-read from scratch` : ""}${stats.raced ? `, ${stats.raced} left to another indexer` : ""}` +
+      `${duplicateLine(stats)})`;
   return `${changed} in ${(stats.ms / 1000).toFixed(1)} s; ${n(stats.transcripts)} transcripts on disk, ` +
     `${n(stats.sessions)} sessions and ${n(stats.messages)} messages in the database (${bytes(stats.databaseBytes)})` +
     `${stats.summarized ? `; ${n(stats.summarized)} summaries refreshed` : ""}${stats.optimized ? "; search index optimised" : ""}` +
@@ -85,7 +96,8 @@ async function runRebuild(args: ParsedArgs): Promise<number> {
     console.log(
       args.flags.has("json")
         ? JSON.stringify(stats)
-        : `Rebuilt: ${sweepLine(stats.sweep)} Kept ${n(stats.carriedSessions)} archived sessions (${n(stats.carriedMessages)} messages) whose transcripts are gone.`
+        : `Rebuilt: ${sweepLine(stats.sweep)} Kept ${n(stats.carriedSessions)} archived sessions (${n(stats.carriedMessages)} messages) whose transcripts are gone` +
+          `${stats.carriedSharedLines ? ` (${n(stats.carriedSharedLines)} of their lines also held by a re-read session)` : ""}.`
     );
     return 0;
   } catch (error) {
