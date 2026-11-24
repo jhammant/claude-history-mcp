@@ -31,6 +31,7 @@ import { extractContent, isLocalCommandEcho, truncate, type ToolResult } from ".
 import { formatOf } from "../formats/registry.js";
 import type { TranscriptFile } from "../parsers/transcript-files.js";
 import { claudeProjectDir, UNKNOWN_PROJECT } from "../utils/path-encoder.js";
+import { implicitRepoKey, REPO_NEW_DIR_KEY, repoResolver } from "../repos/resolve.js";
 import { stripRemoteCredentials } from "../repos/url.js";
 import { lineKey } from "./line-keys.js";
 import { readLines } from "./line-reader.js";
@@ -471,6 +472,12 @@ function prepare(db: DB) {
          index_rev = index_rev + 1
        WHERE sid = ?`
     ),
+    repoIdent: db.prepare("SELECT host, cwd, git_remote, cwd_git, repo FROM sessions WHERE sid = ?"),
+    gitCwdSeen: db.prepare("SELECT 1 FROM sessions WHERE host = ? AND cwd = ? AND sid != ? AND cwd_git = 1 LIMIT 1"),
+    flagNewDir: db.prepare("INSERT INTO meta(key, value) VALUES (?, '1') ON CONFLICT(key) DO UPDATE SET value = excluded.value"),
+    setRepo: db.prepare("UPDATE sessions SET repo = ?, repo_root = ? WHERE sid = ?"),
+    resolveRepo: repoResolver(db),
+    implicitKey: implicitRepoKey(db),
   };
 }
 
@@ -706,12 +713,46 @@ export function indexFile(db: DB, file: TranscriptFile, options: IndexFileOption
             }
             r.dirty = false;
           }
+          type Ident = { host: string; cwd: string | null; git_remote: string | null; cwd_git: number; repo: string | null };
+          const hasGit = (i: Ident | undefined) => !!i && i.cwd_git === 1;
+          const before = s.repoIdent.get(session.sid) as Ident | undefined;
           // A remote's credentials never reach the database.
           s.updateSession.run({
             ...update, gitRemote: update.gitRemote ? stripRemoteCredentials(update.gitRemote) : null,
             copiedGitRemote: update.copiedGitRemote ? stripRemoteCredentials(update.copiedGitRemote) : null,
             added, host, sid: session.sid,
           });
+          // Resolve on write: O(1) per file, covering sweep and query-time top-up alike. A session
+          // that cannot resolve stays null until its own file is next read. Every lookup is
+          // scoped by the host stored on the session (the first host wins), not this call's.
+          const ident = s.repoIdent.get(session.sid) as Ident;
+          // The first git evidence at a directory on a host (a branch or remote on a line at the
+          // cwd) may fold worktree sessions already resolved under it (<dir>/.worktrees/<n>
+          // indexed before <dir> itself): it flags the next sweep's full pass. A session whose
+          // unknown host was just filled brings its evidence to that host for the first time.
+          const newAtCwd = (has: (i: Ident | undefined) => boolean) =>
+            !!ident.cwd && has(ident) && (!has(before) || before?.cwd !== ident.cwd || before?.host !== ident.host);
+          if (newAtCwd(hasGit) && s.gitCwdSeen.get(ident.host, ident.cwd, session.sid) === undefined) {
+            s.flagNewDir.run(REPO_NEW_DIR_KEY);
+          }
+          // A first remote with git evidence at the cwd is an implicit map row there: when it
+          // changes the key that directory's sessions take (sessions resolved before it took
+          // the path), it flags the full pass too.
+          else if (newAtCwd((i) => hasGit(i) && !!i?.git_remote) &&
+              s.implicitKey(ident.host, ident.cwd as string, session.sid) !== s.implicitKey(ident.host, ident.cwd as string)) {
+            s.flagNewDir.run(REPO_NEW_DIR_KEY);
+          }
+          // A session's own cwd or remote replaced one its copied lines gave, or its unknown
+          // host was filled: resolve it again.
+          if (ident.repo !== null && before && ((before.cwd !== null && before.cwd !== ident.cwd) ||
+              (before.git_remote !== null && before.git_remote !== ident.git_remote) || before.host !== ident.host)) {
+            s.setRepo.run(null, null, session.sid);
+            ident.repo = null;
+          }
+          if (ident.repo === null && (ident.cwd || ident.git_remote)) {
+            const repo = s.resolveRepo({ host: ident.host, cwd: ident.cwd, gitRemote: ident.git_remote });
+            if (repo) s.setRepo.run(repo.key, repo.root, session.sid);
+          }
           const tail = builder.pending;
           const tailState = {
             tailRowid: tail?.rowid ?? null, tailMsgId: tail?.msgId ?? null, pendingTools: serializePendingTools(builder.calls),
