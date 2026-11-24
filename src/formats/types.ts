@@ -1,7 +1,7 @@
 import type { ListOptions, TranscriptFile } from "../parsers/transcript-files.js";
 
 export type Source = "claude" | "codex" | "pi";
-/** Every source, in display order: the one list the query filter, counts and report derive from. */
+/** Every source, in display order: the one list the query filter and counts derive from. */
 export const SOURCES: readonly Source[] = ["claude", "codex", "pi"];
 /** How a source is written in prose: "Claude sessions", "Codex sessions", "pi sessions". */
 export const SOURCE_LABELS: Record<Source, string> = { claude: "Claude", codex: "Codex", pi: "pi" };

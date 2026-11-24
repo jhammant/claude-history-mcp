@@ -181,6 +181,7 @@ export function rolloutMeta(
 ) {
   return rollout('session_meta', {
     id: uuid, timestamp: opts.timestamp ?? '2026-10-01T09:00:00Z', cwd: opts.cwd ?? '/work/app', originator: 'codex_cli_rs', cli_version: '0.0.0',
+    // Real Codex headers also carry repository_url; the parser ignores it, and this keeps the fixture realistic.
     git: { branch: opts.branch ?? 'main', commit_hash: 'abc', repository_url: 'https://git.example.org/team/app.git' },
     ...(opts.threadSource ? { thread_source: opts.threadSource } : {}),
     ...(opts.parentThreadId ? { parent_thread_id: opts.parentThreadId } : {}),

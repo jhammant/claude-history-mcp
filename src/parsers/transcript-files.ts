@@ -32,10 +32,6 @@ export interface ListOptions {
   includeSubagentsOf?: (parentSessionId: string) => boolean;
 }
 
-export function transcriptRoots(): Array<{ dir: string; source: Source; format: FormatId }> {
-  return FORMATS.map((f) => ({ dir: f.root(), source: f.source, format: f.id }));
-}
-
 export function listTranscripts(options: ListOptions = {}): TranscriptFile[] {
   return FORMATS.flatMap((f) => f.list(f.root(), options));
 }

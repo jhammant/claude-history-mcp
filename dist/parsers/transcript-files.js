@@ -5,9 +5,6 @@ import { dirname, join } from "path";
 import { collectSubagents, subagentSessionId } from "../formats/claude.js";
 import { FORMATS } from "../formats/registry.js";
 export { subagentSessionId };
-export function transcriptRoots() {
-    return FORMATS.map((f) => ({ dir: f.root(), source: f.source, format: f.id }));
-}
 export function listTranscripts(options = {}) {
     return FORMATS.flatMap((f) => f.list(f.root(), options));
 }

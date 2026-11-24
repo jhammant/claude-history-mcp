@@ -25,11 +25,6 @@ export interface ListOptions {
      */
     includeSubagentsOf?: (parentSessionId: string) => boolean;
 }
-export declare function transcriptRoots(): Array<{
-    dir: string;
-    source: Source;
-    format: FormatId;
-}>;
 export declare function listTranscripts(options?: ListOptions): TranscriptFile[];
 /** Subagent transcripts of one top-level Claude session file. */
 export declare function listSubagentFiles(parent: TranscriptFile): TranscriptFile[];

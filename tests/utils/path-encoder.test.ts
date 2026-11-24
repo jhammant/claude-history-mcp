@@ -3,7 +3,7 @@ import { claudeProjectDir, encodeProjectPath, UNKNOWN_PROJECT } from '../../src/
 
 describe('claudeProjectDir', () => {
   it('replaces every character outside [A-Za-z0-9] with a dash', () => {
-    expect(claudeProjectDir('/home/simon/.claude')).toBe('-home-simon--claude');
+    expect(claudeProjectDir('/home/user/.claude')).toBe('-home-user--claude');
     expect(claudeProjectDir('/mnt/bulk/Github/my_proj')).toBe('-mnt-bulk-Github-my-proj');
   });
 
@@ -12,7 +12,7 @@ describe('claudeProjectDir', () => {
   });
 
   it('leaves encodeProjectPath unchanged', () => {
-    expect(encodeProjectPath('/home/simon/.claude')).toBe('-home-simon-.claude');
+    expect(encodeProjectPath('/home/user/.claude')).toBe('-home-user-.claude');
   });
 
   it('names the unknown placeholder', () => {
