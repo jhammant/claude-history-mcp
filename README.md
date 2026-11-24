@@ -144,6 +144,9 @@ database can hold several machines and `list_projects` can show one project once
   and is one repository on every machine. One without a remote is keyed by host and path, so
   the same path on `laptop` and `desktop` is not taken to be one repository unless a git
   remote says so.
+  A project filter reaches every directory of the repositories it matches, except that a
+  session inside another matched repository's tree (a worktree of one repository under the
+  other's folder) does not bring in the rest of its own repository.
 - **What runs.** `sweep` asks git about the working directories of the sessions it indexed
   and appends the answers to `<host>.jsonl` in the map directory (`CLAUDE_HISTORY_REPO_MAP_DIR`,
   default `<data dir>/repo-map`). When the resolution settings change

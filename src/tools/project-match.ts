@@ -18,18 +18,67 @@ export function matchRepos(db: DB, query: string): string[] {
   return repos.filter((r) => r === q || repoName(r).toLowerCase().includes(lower));
 }
 
+/** A session's place: the machine, its resolved repository, that repository's main root, and its working directory. */
+interface Placed {
+  host: string;
+  repo: string | null;
+  repo_root: string | null;
+  cwd: string | null;
+}
+
+const trimRoot = (p: string): string => p.replace(/\/+$/, "");
+
+/**
+ * The repositories whose sessions a project filter expands to. Each directly matched
+ * session anchors its repository (all of that repository's sessions then match too), unless
+ * it sits inside a different repository that the filter is about. It then does not anchor,
+ * and still matches directly. A session does not anchor when all of these hold:
+ *   1. it has a working directory;
+ *   2. its own repository root does not match the filter;
+ *   3. another repository on the same machine has a root that matches the filter, and the
+ *      working directory is that root or beneath it (segment-aware).
+ * A root matches the filter when it, or its encoded form (-home-me-dev-app), contains the
+ * filter text, case-insensitively. So a worktree of one repository inside another's tree
+ * does not drag in the first repository, while a symlinked path, or a folder holding several
+ * repositories, still reaches every repository it names.
+ */
+function anchoredRepos(db: DB, filter: string, direct: Placed[]): string[] {
+  const f = trimRoot(filter.trim()).toLowerCase();
+  const matches = (root: string): boolean => root.toLowerCase().includes(f) || encodeProjectPath(root).toLowerCase().includes(f);
+  const triples = db
+    .prepare("SELECT DISTINCT host, repo, repo_root FROM sessions WHERE repo IS NOT NULL AND repo_root IS NOT NULL")
+    .all() as Array<{ host: string; repo: string; repo_root: string }>;
+  const matching = triples.filter((t) => matches(t.repo_root));
+  const anchored = new Set<string>();
+  for (const s of direct) {
+    if (s.repo === null) continue;
+    const cwd = s.cwd === null ? null : trimRoot(s.cwd);
+    const nested =
+      cwd !== null &&
+      !(s.repo_root !== null && matches(s.repo_root)) &&
+      matching.some((a) => {
+        if (a.host !== s.host || a.repo === s.repo) return false;
+        const root = trimRoot(a.repo_root);
+        return cwd === root || cwd.startsWith(root + "/");
+      });
+    if (!nested) anchored.add(s.repo);
+  }
+  return [...anchored];
+}
+
 /**
  * Every repository of a project filter as the search engine applies it (a substring of the
  * project dir or working directory), plus the repositories the text names: the sessions of
  * these repositories match the filter too, so it reaches their worktrees and other paths.
+ * A session nested in a different repository's tree does not anchor its own repository
+ * (see anchoredRepos).
  */
 export function reposForProjectFilter(db: DB, filter: string): string[] {
   const like = `%${likeEscape(filter)}%`;
-  const viaSessions = db
-    .prepare("SELECT DISTINCT repo FROM sessions WHERE repo IS NOT NULL AND (project LIKE ? ESCAPE '\\' OR cwd LIKE ? ESCAPE '\\')")
-    .pluck()
-    .all(like, like) as string[];
-  return [...new Set([...viaSessions, ...matchRepos(db, filter)])];
+  const direct = db
+    .prepare("SELECT DISTINCT host, repo, repo_root, cwd FROM sessions WHERE repo IS NOT NULL AND (project LIKE ? ESCAPE '\\' OR cwd LIKE ? ESCAPE '\\')")
+    .all(like, like) as Placed[];
+  return [...new Set([...anchoredRepos(db, filter, direct), ...matchRepos(db, filter)])];
 }
 
 /** Every project with a session in one of these repositories. */
@@ -60,7 +109,8 @@ function directProjects(db: DB, q: string): string[] {
  * it), an encoded dir, part of a name ("ghostty" matches -Users-me-dev-ghostty), or a
  * repository (its key, or part of its name). Then every project that shares a repository
  * with a match, so a repository name or any one of its directories reaches all of its
- * directories and worktrees, on every machine.
+ * directories and worktrees, on every machine. Except that a match nested in a different
+ * repository's tree does not anchor its own repository (see anchoredRepos).
  */
 export function matchProjects(db: DB, query: string): string[] {
   const q = query.trim();
@@ -68,11 +118,10 @@ export function matchProjects(db: DB, query: string): string[] {
   const direct = directProjects(db, q);
   const repos = new Set(matchRepos(db, q));
   if (direct.length) {
-    const own = db
-      .prepare("SELECT DISTINCT repo FROM sessions WHERE repo IS NOT NULL AND project IN (SELECT value FROM json_each(?))")
-      .pluck()
-      .all(JSON.stringify(direct)) as string[];
-    for (const r of own) repos.add(r);
+    const placed = db
+      .prepare("SELECT DISTINCT host, repo, repo_root, cwd FROM sessions WHERE repo IS NOT NULL AND project IN (SELECT value FROM json_each(?))")
+      .all(JSON.stringify(direct)) as Placed[];
+    for (const r of anchoredRepos(db, q, placed)) repos.add(r);
   }
   return [...new Set([...direct, ...projectsOfRepos(db, [...repos])])];
 }
