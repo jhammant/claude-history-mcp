@@ -140,7 +140,18 @@ function keyParts(key: string): KeyParts {
   const path = /^([^/]*):(?=\/)/.exec(key);
   if (path) return { remote: false, host: path[1] };
   if (key.startsWith("/")) return { remote: false, host: "" };
+  // A Windows path (drive path, or anything with a backslash; a remote never has one), after an optional `<host>:`.
+  if (/^[A-Za-z]:\\/.test(key)) return { remote: false, host: "" };
+  const windows = /^([^/\\:]+):(?=[A-Za-z]:[\\/]|.*\\)/.exec(key);
+  if (windows) return { remote: false, host: windows[1] };
+  if (key.includes("\\")) return { remote: false, host: "" };
   return { remote: true, ownerName: key.split("/").slice(-2).join("/") };
+}
+
+/** The host of a path key (`<host>:<path>`); null for a remote key or a path key with no host. */
+export function pathKeyHost(key: string): string | null {
+  const k = keyParts(key);
+  return !k.remote && k.host !== "" ? k.host : null;
 }
 
 /**
@@ -291,19 +302,25 @@ function resolveWith(
   return cwd ? pathRepo(input.host, root as string) : null;
 }
 
+/** The test of strong repository evidence (see repoEvidence) for a directory of a host, read from the database. */
+export function dbRepoEvidence(db: DB): (host: string, dir: string) => boolean {
+  const mapped = db.prepare("SELECT 1 FROM repo_map WHERE host = @h AND (dir = @d OR root = @d) LIMIT 1");
+  const git = db.prepare("SELECT 1 FROM sessions WHERE host = ? AND cwd = ? AND cwd_git = 1 LIMIT 1");
+  return (h, dir) => repoEvidence({
+    mapped: (d) => mapped.get({ h, d }) !== undefined,
+    gitSession: (d) => git.get(h, d) !== undefined,
+  })(dir);
+}
+
 /** The repository of one session, with its statements prepared once, for callers that resolve many times. */
 export function repoResolver(db: DB): (input: ResolveInput) => Repo | null {
   const mapRow = db.prepare("SELECT root, remote FROM repo_map WHERE host = ? AND dir = ?");
-  const mapped = db.prepare("SELECT 1 FROM repo_map WHERE host = @h AND (dir = @d OR root = @d) LIMIT 1");
-  const git = db.prepare("SELECT 1 FROM sessions WHERE host = ? AND cwd = ? AND cwd_git = 1 LIMIT 1");
+  const evidence = dbRepoEvidence(db);
   const implicit = dbImplicitRemotes(db);
   // Aliases and container names are read per call: they come from the environment, which may change.
   return (input) => {
     const h = input.host;
-    const isRepoDir = repoEvidence({
-      mapped: (d) => mapped.get({ h, d }) !== undefined,
-      gitSession: (d) => git.get(h, d) !== undefined,
-    });
+    const isRepoDir: RepoDirTest = (d) => evidence(h, d);
     return resolveWith((dir) => mapRow.get(h, dir) as MapRow | undefined, isRepoDir, (dir) => implicit(h, dir), input,
       hostAliasesFromEnv(), CONFIG.worktreeDirs);
   };

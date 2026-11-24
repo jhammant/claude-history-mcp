@@ -147,11 +147,14 @@ database can hold several machines and `list_projects` can show one project once
   remote says so.
   Two repositories that share a name are listed by checkout path where that tells them
   apart, else as `owner/name`, the full remote, or `name @host`; a project filter accepts
-  `owner/name` too.
+  `owner/name` and `name @host` too (the latter names the repositories called `name` that
+  have no remote, on that host). Trailing slashes on a filter are ignored.
   A project filter reaches every directory of the repositories it matches. The exception is
-  a session on the same machine inside another repository's tree, when that repository has
-  a known remote and the session's own repository root does not match the filter: it
-  does not bring in the rest of its own repository.
+  a session on the same machine inside another repository's tree, when that repository is
+  known to be a git repository (it has a remote, or a path key with git evidence at its
+  root: the pushed map names the root, or a session that ran there saw git) and the
+  session's own repository root does not match the filter: it does not bring in the rest of
+  its own repository. A plain folder that only holds sessions is not such a repository.
 - **What runs.** `sweep` asks git about the working directories of the sessions it indexed
   and appends the answers to `<host>.jsonl` in the map directory (`CLAUDE_HISTORY_REPO_MAP_DIR`,
   default `<data dir>/repo-map`). When the resolution settings change

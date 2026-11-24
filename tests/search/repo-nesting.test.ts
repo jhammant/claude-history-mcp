@@ -8,7 +8,8 @@ import { createCorpus, userLine, type Corpus } from '../helpers/corpus.js';
 interface Row { id: string; project: string; cwd: string | null; repo: string | null; root: string | null; host?: string }
 
 /**
- * Index a real transcript per session, then set the repository columns by hand so each case
+ * Index a real transcript per session, then set the repository columns by hand (and clear
+ * cwd_git, so git evidence exists only where a case adds it) so each case
  * states exactly the (host, repo, repo_root) it is about.
  */
 function build(corpus: Corpus, rows: Row[]): DB {
@@ -19,7 +20,7 @@ function build(corpus: Corpus, rows: Row[]): DB {
   }
   const db = corpus.open();
   sweep(db);
-  const set = db.prepare('UPDATE sessions SET cwd = ?, repo = ?, repo_root = ?, host = ? WHERE id = ?');
+  const set = db.prepare('UPDATE sessions SET cwd = ?, repo = ?, repo_root = ?, host = ?, cwd_git = 0 WHERE id = ?');
   for (const r of rows) set.run(r.cwd, r.repo, r.root, r.host ?? 'laptop', r.id);
   return db;
 }
@@ -116,5 +117,61 @@ describe('filters that still expand', () => {
     ]);
     expect(reposForProjectFilter(db, '-home-me-my-app')).toEqual([APP]);
     expect(matchProjects(db, '-home-me-my-app')).not.toContain('-x-Lib');
+  });
+});
+
+describe('a repository nested in a repository known only by its path', () => {
+  let corpus: Corpus;
+  beforeEach(() => { corpus = createCorpus(); });
+  afterEach(() => corpus.cleanup());
+
+  const ROOT_KEY = 'laptop:/home/me/dev/app';
+  const rows: Row[] = [
+    { id: 'app-1', project: '-home-me-dev-app', cwd: '/home/me/dev/app', repo: ROOT_KEY, root: '/home/me/dev/app' },
+    { id: 'lib-nested', project: '-home-me-dev-app--claude-worktrees-lib-skin', cwd: '/home/me/dev/app/.claude/worktrees/lib-skin', repo: LIB, root: '/x/Lib' },
+    { id: 'lib-main', project: '-x-Lib', cwd: '/x/Lib', repo: LIB, root: '/x/Lib' },
+  ];
+
+  it('is a containing repository when a session saw git at its root', () => {
+    const db = build(corpus, rows);
+    db.prepare("UPDATE sessions SET cwd_git = 1 WHERE id = 'app-1'").run();
+    expect(reposForProjectFilter(db, '/home/me/dev/app')).toEqual([ROOT_KEY]);
+    expect(matchProjects(db, '/home/me/dev/app')).not.toContain('-x-Lib');
+  });
+
+  it('is a containing repository when the pushed map names its root', () => {
+    const db = build(corpus, rows);
+    db.prepare("INSERT INTO repo_map(host, dir, root, remote, at) VALUES ('laptop', '/home/me/dev/app', '/home/me/dev/app', NULL, 1)").run();
+    expect(reposForProjectFilter(db, '/home/me/dev/app')).toEqual([ROOT_KEY]);
+  });
+
+  it('is not one on another host evidence alone', () => {
+    const db = build(corpus, rows);
+    db.prepare("INSERT INTO repo_map(host, dir, root, remote, at) VALUES ('desktop', '/home/me/dev/app', '/home/me/dev/app', NULL, 1)").run();
+    expect(reposForProjectFilter(db, '/home/me/dev/app').sort()).toEqual([LIB, ROOT_KEY].sort());
+  });
+
+  it('a plain folder with no git evidence still does not contain it', () => {
+    const db = build(corpus, rows);
+    expect(reposForProjectFilter(db, '/home/me/dev/app').sort()).toEqual([LIB, ROOT_KEY].sort());
+  });
+});
+
+
+describe('a project filter with a trailing slash', () => {
+  let corpus: Corpus;
+  let db: DB;
+  beforeEach(() => { corpus = createCorpus(); db = build(corpus, NESTED); });
+  afterEach(() => corpus.cleanup());
+
+  it.each(['/home/me/dev/app/', '/home/me/dev/app//'])('%s finds what the same path without it finds', (filter) => {
+    expect(new SearchEngine(db).search('gearbox', { project: filter }).hits.map((h) => h.sessionId).sort()).toEqual(['app-1', 'lib-nested']);
+    expect(reposForProjectFilter(db, filter)).toEqual([APP]);
+    expect(matchProjects(db, filter).sort()).toEqual(matchProjects(db, '/home/me/dev/app').sort());
+    expect(matchProjects(db, filter)).toContain('-home-me-dev-app');
+  });
+
+  it('a bare slash stays as it is', () => {
+    expect(new SearchEngine(db).search('gearbox', { project: '/' }).hits).toHaveLength(3);
   });
 });

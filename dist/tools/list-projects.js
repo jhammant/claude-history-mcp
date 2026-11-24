@@ -1,6 +1,7 @@
 import { SOURCES, SOURCE_LABELS } from "../formats/types.js";
 import { formatDateTime, hostCount, projectName, tildePath } from "../search/format.js";
 import { distinctNames } from "../repos/resolve.js";
+import { projectFilterText } from "./project-match.js";
 import { decodeProjectPath } from "../utils/path-encoder.js";
 const DEFAULT_LIMIT = 30;
 const MAX_LIMIT = 200;
@@ -95,7 +96,7 @@ export function handleListProjects(db, args) {
     const all = [...groups.entries()].map(([key, g]) => ({ key, ...g }));
     for (const g of all)
         g.members.sort((a, b) => b.last - a.last || a.dir.localeCompare(b.dir));
-    const query = args.query?.trim().toLowerCase();
+    const query = args.query === undefined ? undefined : projectFilterText(args.query.trim()).toLowerCase();
     const rows = query
         ? all.filter((g) => g.name.toLowerCase().includes(query) ||
             [...g.cwds, ...g.projects].some((d) => d.toLowerCase().includes(query)))

@@ -46,6 +46,13 @@ describe('list_projects', () => {
     expect(text).not.toContain('more not shown');
   });
 
+  it('ignores trailing slashes on the filter', () => {
+    const text = handleListProjects(corpus.open(), { query: '/work/billing/' });
+
+    expect(text).toContain('1 project with conversation history matching');
+    expect(text).toContain('- billing');
+  });
+
   it('says so when nothing matches the filter', () => {
     const text = handleListProjects(corpus.open(), { query: 'nope' });
 
@@ -117,6 +124,23 @@ describe('list_projects across hosts', () => {
     expect(out).toMatch(/^- app @laptop — 1 sessions/m);
     expect(out).toContain('  Hosts: laptop');
     expect(out).toContain('  Hosts: desktop');
+  });
+
+  it('accepts the label "name @host" as a filter', () => {
+    for (const host of ['laptop', 'desktop']) {
+      onHost(host, () => corpus.write(corpus.sessionPath('-home-me-app', `s-${host}`), [
+        userLine('hello', { cwd: '/home/me/app', sessionId: `s-${host}` }),
+        assistantText('hi', { cwd: '/home/me/app', sessionId: `s-${host}` }),
+      ]));
+    }
+    const db = corpus.open();
+    expect(matchRepos(db, 'app @desktop')).toEqual(['desktop:/home/me/app']);
+    expect(matchRepos(db, 'APP @Laptop')).toEqual(['laptop:/home/me/app']);
+    expect(matchRepos(db, 'app @elsewhere')).toEqual([]);
+    expect(matchRepos(db, 'pp @laptop')).toEqual([]);
+    const hits = new SearchEngine(db).search('hello', { project: 'app @desktop' }).hits.map((h) => h.sessionId);
+    expect(hits).toEqual(['s-desktop']);
+    expect(matchProjects(db, 'app @desktop')).toHaveLength(1);
   });
 
   it('lists one row with both hosts for a repository with a remote', () => {

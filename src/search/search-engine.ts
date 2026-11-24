@@ -17,7 +17,7 @@
  */
 
 import { CONFIG } from "../config.js";
-import { reposForProjectFilter } from "../tools/project-match.js";
+import { projectFilterText, reposForProjectFilter } from "../tools/project-match.js";
 import { hostCount } from "./format.js";
 import type { DB } from "../db/database.js";
 import {
@@ -132,7 +132,7 @@ function hasSessionFilter(filters: QueryFilters): boolean {
 function sessionClauses(filters: QueryFilters, params: Record<string, unknown>, dateRange: boolean, projectRepos: string[] = []): string[] {
   const clauses: string[] = [];
   if (filters.project) {
-    params.project = `%${likeEscape(filters.project)}%`;
+    params.project = `%${likeEscape(projectFilterText(filters.project))}%`;
     // Also every session of a repository the filter names or reaches (its worktrees, other paths).
     const repos = projectRepos.length ? " OR s.repo IN (SELECT value FROM json_each(@projectRepos))" : "";
     if (repos) params.projectRepos = JSON.stringify(projectRepos);

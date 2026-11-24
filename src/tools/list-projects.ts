@@ -2,6 +2,7 @@ import { SOURCES, SOURCE_LABELS, type Source } from "../formats/types.js";
 import type { DB } from "../db/database.js";
 import { formatDateTime, hostCount, projectName, tildePath } from "../search/format.js";
 import { distinctNames } from "../repos/resolve.js";
+import { projectFilterText } from "./project-match.js";
 import { decodeProjectPath } from "../utils/path-encoder.js";
 
 interface DirRow {
@@ -129,7 +130,7 @@ export function handleListProjects(db: DB, args: { sort_by?: string; limit?: num
   const all = [...groups.entries()].map(([key, g]) => ({ key, ...g }));
   for (const g of all) g.members.sort((a, b) => b.last - a.last || a.dir.localeCompare(b.dir));
 
-  const query = args.query?.trim().toLowerCase();
+  const query = args.query === undefined ? undefined : projectFilterText(args.query.trim()).toLowerCase();
   const rows = query
     ? all.filter((g) =>
         g.name.toLowerCase().includes(query) ||

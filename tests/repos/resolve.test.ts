@@ -4,7 +4,7 @@ import { join } from 'path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { openDatabase, type DB } from '../../src/db/database.js';
 import {
-  distinctNames, foldWorktreePath, lastSegment, pathKey, repoName, repoResolvedStamp, repoResolver, resolveAllSessions,
+  distinctNames, foldWorktreePath, lastSegment, pathKey, pathKeyHost, repoName, repoResolvedStamp, repoResolver, resolveAllSessions,
 } from '../../src/repos/resolve.js';
 
 describe('foldWorktreePath', () => {
@@ -389,6 +389,28 @@ describe('distinctNames', () => {
     expect(repoName('laptop:/home/me/app')).toBe('app');
     expect(repoName('/home/me/app')).toBe('app');
     expect(repoName('example.com/acme/app')).toBe('app');
+  });
+
+  it('treats a Windows path as a path key, with or without a host', () => {
+    const labels = (keys: string[]) =>
+      Object.fromEntries(distinctNames(keys.map((key) => ({ key, root: null })), () => null));
+    expect(labels(['hostA:C:\\w\\app', 'hostB:C:\\w\\app'])).toEqual({
+      'hostA:C:\\w\\app': 'app @hostA',
+      'hostB:C:\\w\\app': 'app @hostB',
+    });
+    expect(repoName('hostA:C:\\w\\app')).toBe('app');
+    expect(repoName('C:\\w\\app')).toBe('app');
+    // bare drive path (host unknown) beside a path key with a host: the bare one has no host label
+    expect(labels(['C:\\w\\app', 'hostA:C:\\w\\app'])['hostA:C:\\w\\app']).toBe('app @hostA');
+    expect(pathKeyHost('hostA:C:\\w\\app')).toBe('hostA');
+    expect(pathKeyHost('C:\\w\\app')).toBeNull();
+    expect(pathKeyHost('hostA:\\\\srv\\share\\app')).toBe('hostA');
+    // a remote with a port is still a remote
+    expect(pathKeyHost('example.com:8080/acme/tools')).toBeNull();
+    expect(labels(['example.com:8080/acme/tools', 'other.example.com/acme/tools'])).toEqual({
+      'example.com:8080/acme/tools': 'example.com:8080/acme/tools',
+      'other.example.com/acme/tools': 'other.example.com/acme/tools',
+    });
   });
 
   describe('repositories sharing a name', () => {

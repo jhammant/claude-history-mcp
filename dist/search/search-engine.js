@@ -16,7 +16,7 @@
  * every one of them.
  */
 import { CONFIG } from "../config.js";
-import { reposForProjectFilter } from "../tools/project-match.js";
+import { projectFilterText, reposForProjectFilter } from "../tools/project-match.js";
 import { hostCount } from "./format.js";
 import { looseGroups, looseMatch, parseQuery, strictMatch, } from "./query-processor.js";
 /** Snippet markers that cannot occur in text, swapped for ** on output. */
@@ -41,7 +41,7 @@ function hasSessionFilter(filters) {
 function sessionClauses(filters, params, dateRange, projectRepos = []) {
     const clauses = [];
     if (filters.project) {
-        params.project = `%${likeEscape(filters.project)}%`;
+        params.project = `%${likeEscape(projectFilterText(filters.project))}%`;
         // Also every session of a repository the filter names or reaches (its worktrees, other paths).
         const repos = projectRepos.length ? " OR s.repo IN (SELECT value FROM json_each(@projectRepos))" : "";
         if (repos)

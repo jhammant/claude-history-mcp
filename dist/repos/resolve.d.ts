@@ -59,6 +59,8 @@ export declare function lastSegment(path: string): string;
  * the path has no segment of its own (the filesystem root).
  */
 export declare function repoName(key: string): string;
+/** The host of a path key (`<host>:<path>`); null for a remote key or a path key with no host. */
+export declare function pathKeyHost(key: string): string | null;
 /**
  * Display names for repositories, unique where two different ones share a name: each of
  * those is shown by its path (`pathLabel` of its root, when that is unique among them).
@@ -73,6 +75,8 @@ export declare function distinctNames(repos: Iterable<{
 }>, pathLabel: (root: string) => string | null, reserved?: ReadonlySet<string>): Map<string, string>;
 /** The repository key the host's implicit map rows give `dir` (aliases from the environment), or null. */
 export declare function implicitRepoKey(db: DB): (host: string, dir: string, exceptSid?: number) => string | null;
+/** The test of strong repository evidence (see repoEvidence) for a directory of a host, read from the database. */
+export declare function dbRepoEvidence(db: DB): (host: string, dir: string) => boolean;
 /** The repository of one session, with its statements prepared once, for callers that resolve many times. */
 export declare function repoResolver(db: DB): (input: ResolveInput) => Repo | null;
 /**
