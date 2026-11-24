@@ -8,6 +8,8 @@ export declare function matchRepos(db: DB, query: string): string[];
  * Every repository of a project filter as the search engine applies it (a substring of the
  * project dir or working directory), plus the repositories the text names: the sessions of
  * these repositories match the filter too, so it reaches their worktrees and other paths.
+ * A session nested in a different repository's tree does not anchor its own repository
+ * (see anchoredRepos).
  */
 export declare function reposForProjectFilter(db: DB, filter: string): string[];
 /**
@@ -15,7 +17,8 @@ export declare function reposForProjectFilter(db: DB, filter: string): string[];
  * it), an encoded dir, part of a name ("ghostty" matches -Users-me-dev-ghostty), or a
  * repository (its key, or part of its name). Then every project that shares a repository
  * with a match, so a repository name or any one of its directories reaches all of its
- * directories and worktrees, on every machine.
+ * directories and worktrees, on every machine. Except that a match nested in a different
+ * repository's tree does not anchor its own repository (see anchoredRepos).
  */
 export declare function matchProjects(db: DB, query: string): string[];
 /** SQL placeholder list and values for an IN (...) over projects. */
