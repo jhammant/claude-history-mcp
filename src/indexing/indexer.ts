@@ -742,15 +742,17 @@ export function indexFile(db: DB, file: TranscriptFile, options: IndexFileOption
               s.implicitKey(ident.host, ident.cwd as string, session.sid) !== s.implicitKey(ident.host, ident.cwd as string)) {
             s.flagNewDir.run(REPO_NEW_DIR_KEY);
           }
-          // A session's own cwd or remote replaced one its copied lines gave, or its unknown
-          // host was filled: resolve it again.
+          // A session's own cwd or remote replaced one its copied lines gave, its unknown host
+          // was filled, or git evidence at its cwd now ranks its remote above the map: resolve
+          // it again.
           if (ident.repo !== null && before && ((before.cwd !== null && before.cwd !== ident.cwd) ||
-              (before.git_remote !== null && before.git_remote !== ident.git_remote) || before.host !== ident.host)) {
+              (before.git_remote !== null && before.git_remote !== ident.git_remote) || before.host !== ident.host ||
+              (ident.git_remote !== null && before.cwd_git !== ident.cwd_git))) {
             s.setRepo.run(null, null, session.sid);
             ident.repo = null;
           }
           if (ident.repo === null && (ident.cwd || ident.git_remote)) {
-            const repo = s.resolveRepo({ host: ident.host, cwd: ident.cwd, gitRemote: ident.git_remote });
+            const repo = s.resolveRepo({ host: ident.host, cwd: ident.cwd, gitRemote: ident.git_remote, cwdGit: ident.cwd_git === 1 });
             if (repo) s.setRepo.run(repo.key, repo.root, session.sid);
           }
           const tail = builder.pending;

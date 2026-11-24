@@ -94,10 +94,24 @@ describe('repoResolver', () => {
     db.prepare("INSERT INTO sessions(id, project, host, cwd, git_branch, cwd_git, source) VALUES (?, 'p', ?, ?, 'main', 1, 'claude')")
       .run(id, host, cwd);
 
-  it('step 1: the session git remote wins over everything', () => {
+  it('step 1: the session git remote seen at its cwd (cwd_git = 1) wins over everything', () => {
     map('laptop', '/w/a', '/w/a', 'https://h.example/o/other.git');
-    expect(resolve({ host: 'laptop', cwd: '/w/a', gitRemote: 'git@h.example:Team/App.git' }))
+    expect(resolve({ host: 'laptop', cwd: '/w/a', gitRemote: 'git@h.example:Team/App.git', cwdGit: true }))
       .toEqual({ key: 'h.example/team/app', name: 'app', root: '/w/a' });
+  });
+
+  it('a session remote not seen at its cwd (cwd_git = 0) yields to the map row for the cwd or its nearest parent', () => {
+    map('laptop', '/w/b', '/w/b', 'https://h.example/o/b.git');
+    map('laptop', '/w/c', '/w/c', null);
+    const fromA = { host: 'laptop', gitRemote: 'https://h.example/o/a.git', cwdGit: false };
+    expect(resolve({ ...fromA, cwd: '/w/b' })).toEqual({ key: 'h.example/o/b', name: 'b', root: '/w/b' });
+    expect(resolve({ ...fromA, cwd: '/w/b/src/deep' })).toEqual({ key: 'h.example/o/b', name: 'b', root: '/w/b' });
+    // a map row with no usable remote ends at a path key: key and root from the same row
+    expect(resolve({ ...fromA, cwd: '/w/c/x' })).toEqual({ key: 'laptop:/w/c', name: 'c', root: '/w/c' });
+    // with no map row, the session's remote is still used
+    expect(resolve({ ...fromA, cwd: '/w/d' })).toEqual({ key: 'h.example/o/a', name: 'a', root: '/w/d' });
+    // another host's map row never applies
+    expect(resolve({ ...fromA, host: 'desktop', cwd: '/w/b' })).toEqual({ key: 'h.example/o/a', name: 'a', root: '/w/b' });
   });
 
   it('step 2: the map row for the cwd, or its longest ancestor, path-segment aware', () => {
@@ -123,10 +137,10 @@ describe('repoResolver', () => {
   });
 
   it('knows the repo from a remote alone, and returns null with nothing usable', () => {
-    expect(resolve({ host: 'laptop', cwd: null, gitRemote: 'https://h.example/o/r.git' }))
+    expect(resolve({ host: 'laptop', cwd: null, gitRemote: 'https://h.example/o/r.git', cwdGit: false }))
       .toEqual({ key: 'h.example/o/r', name: 'r', root: null });
     expect(resolve({ host: 'laptop', cwd: null, gitRemote: null })).toBeNull();
-    expect(resolve({ host: 'laptop', cwd: null, gitRemote: 'nonsense' })).toBeNull();
+    expect(resolve({ host: 'laptop', cwd: null, gitRemote: 'nonsense', cwdGit: false })).toBeNull();
   });
 
   it('folds worktrees when a session with a git branch or remote, or a map entry, shows the parent is a repository', () => {
@@ -154,8 +168,8 @@ describe('repoResolver', () => {
   });
 
   it('gives two cwds on different paths one key through a shared remote', () => {
-    const a = resolve({ host: 'laptop', cwd: '/x/one', gitRemote: 'https://h.example/o/r.git' });
-    const b = resolve({ host: 'laptop', cwd: '/y/two', gitRemote: 'ssh://git@h.example:22/O/R' });
+    const a = resolve({ host: 'laptop', cwd: '/x/one', gitRemote: 'https://h.example/o/r.git', cwdGit: true });
+    const b = resolve({ host: 'laptop', cwd: '/y/two', gitRemote: 'ssh://git@h.example:22/O/R', cwdGit: true });
     expect(a?.key).toBe('h.example/o/r');
     expect(b?.key).toBe(a?.key);
   });
@@ -185,7 +199,7 @@ describe('repoResolver', () => {
   it('gives one key to a repository with a remote on every host', () => {
     map('laptop', '/home/me/app', '/home/me/app', 'https://example.com/acme/app.git');
     const laptop = resolve({ host: 'laptop', cwd: '/home/me/app/src', gitRemote: null });
-    const desktop = resolve({ host: 'desktop', cwd: '/srv/code/app', gitRemote: 'git@example.com:acme/app.git' });
+    const desktop = resolve({ host: 'desktop', cwd: '/srv/code/app', gitRemote: 'git@example.com:acme/app.git', cwdGit: true });
     expect(laptop).toEqual({ key: 'example.com/acme/app', name: 'app', root: '/home/me/app' });
     expect(desktop).toEqual({ key: 'example.com/acme/app', name: 'app', root: '/srv/code/app' });
   });
@@ -269,14 +283,26 @@ describe('resolveAllSessions', () => {
     session('wt2', '/w/p0/worktrees/n', null);
     session('remote-only', null, 'https://h.example/o/r.git');
     session('implicit', '/w/p5', 'https://h.example/o/p5.git', 1);
+    // a remote seen elsewhere (cwd_git = 0): the map row wins where there is one, on its host only
+    session('elsewhere-mapped', '/w/p3/src', 'https://h.example/o/a.git', 0);
+    session('elsewhere-mapped-desk', '/w/p3/src', 'https://h.example/o/a.git', 0, 'desktop');
+    session('elsewhere-mapped-null', '/w/p2', 'https://h.example/o/a.git', 0);
+    session('elsewhere-unmapped', '/w/p6', 'https://h.example/o/a.git', 0);
+    session('here-mapped', '/w/p3', 'https://h.example/o/own.git', 1);
     db.prepare("INSERT INTO repo_map(host, dir, root, remote, at) VALUES ('laptop', '/w/p2', '/w/main', NULL, 1)").run();
+    db.prepare("INSERT INTO repo_map(host, dir, root, remote, at) VALUES ('laptop', '/w/p3', '/w/p3', 'https://h.example/o/p3.git', 1)").run();
     resolveAllSessions(db);
+    expect(repo('elsewhere-mapped')).toEqual({ repo: 'h.example/o/p3', repo_root: '/w/p3' });
+    expect(repo('elsewhere-mapped-desk')).toEqual({ repo: 'h.example/o/a', repo_root: '/w/p3/src' });
+    expect(repo('elsewhere-mapped-null')).toEqual({ repo: 'laptop:/w/main', repo_root: '/w/main' });
+    expect(repo('elsewhere-unmapped')).toEqual({ repo: 'h.example/o/a', repo_root: '/w/p6' });
+    expect(repo('here-mapped')).toEqual({ repo: 'h.example/o/own', repo_root: '/w/p3' });
     const resolve = repoResolver(db);
-    const rows = db.prepare('SELECT host, cwd, git_remote, repo, repo_root FROM sessions').all() as Array<{
-      host: string; cwd: string | null; git_remote: string | null; repo: string | null; repo_root: string | null;
+    const rows = db.prepare('SELECT host, cwd, git_remote, cwd_git, repo, repo_root FROM sessions').all() as Array<{
+      host: string; cwd: string | null; git_remote: string | null; cwd_git: number; repo: string | null; repo_root: string | null;
     }>;
     for (const r of rows) {
-      const want = resolve({ host: r.host, cwd: r.cwd, gitRemote: r.git_remote });
+      const want = resolve({ host: r.host, cwd: r.cwd, gitRemote: r.git_remote, cwdGit: r.cwd_git === 1 });
       expect({ repo: r.repo, repo_root: r.repo_root }).toEqual({ repo: want?.key ?? null, repo_root: want?.root ?? null });
     }
   });

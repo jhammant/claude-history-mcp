@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -79,6 +79,64 @@ describe('implicit map rows from a session remote at its own cwd', () => {
     expect(repo('f1')).toEqual({ repo: 'laptop:/w/folder', repo_root: '/w/folder' });
   });
 
+  describe('a Codex session whose first line runs in another repository (cwd_git = 0)', () => {
+    const B_REMOTE = 'https://example.com/acme/b.git';
+    const mapRow = () => {
+      const mapDir = join(corpus.dataDir, 'repo-map');
+      mkdirSync(mapDir, { recursive: true });
+      writeFileSync(join(mapDir, 'laptop.jsonl'), JSON.stringify({ dir: '/w/repoB', root: '/w/repoB', remote: B_REMOTE, at: 1 }) + '\n');
+    };
+    const leftHeader = () => corpus.write(corpus.rolloutPath('2026-10-01', U2), [
+      rolloutMeta(U2, { cwd: '/w/repoA', repositoryUrl: REMOTE }),
+      rolloutTurn('/w/repoB'),
+      rolloutMessage('user', 'hello from repository B'),
+    ]);
+    const codexRow = () => corpus.open().prepare('SELECT cwd, git_remote, cwd_git, repo, repo_root FROM sessions WHERE id = ?')
+      .get(`codex-${U2}`);
+
+    it('is filed under the map row of its cwd, resolved on write', () => {
+      mapRow();
+      sweep(corpus.open(), NO_GIT); // the map is loaded before the session arrives
+      leftHeader();
+      sweep(corpus.open(), NO_GIT);
+      expect(codexRow()).toEqual({
+        cwd: '/w/repoB', git_remote: REMOTE, cwd_git: 0, repo: 'example.com/acme/b', repo_root: '/w/repoB',
+      });
+    });
+
+    it('is filed under the map row of its cwd by the full pass', () => {
+      mapRow();
+      leftHeader();
+      sweep(corpus.open(), NO_GIT);
+      expect(codexRow()).toMatchObject({ repo: 'example.com/acme/b', repo_root: '/w/repoB' });
+    });
+
+    it('a session with a remote seen elsewhere is resolved again when git evidence later appears at its cwd', () => {
+      mapRow();
+      const line = (text: string, cwd: string, extra: Record<string, unknown> = {}) =>
+        ({ ...userLine(text, { cwd, sessionId: 's1', gitBranch: '' }), ...extra });
+      // git evidence and the same remote already at the cwd: the session's change flags no full pass
+      corpus.write(corpus.sessionPath('-w-repoB', 'other'),
+        [{ ...userLine('hi', { cwd: '/w/repoB', sessionId: 'other', gitBranch: 'main' }), gitRemote: REMOTE }]);
+      const path = corpus.write(corpus.sessionPath('-w-repoB', 's1'), [
+        line('start', '/w/repoB'),
+        line('elsewhere', '/w/repoA', { gitRemote: REMOTE }),
+      ]);
+      sweep(corpus.open(), NO_GIT);
+      expect(repo('s1')).toEqual({ repo: 'example.com/acme/b', repo_root: '/w/repoB' });
+      corpus.append(path, [line('back', '/w/repoB', { gitBranch: 'main' })]);
+      sweep(corpus.open(), NO_GIT);
+      // as the full pass resolves it: a remote with git evidence at the cwd comes first
+      expect(repo('s1')).toEqual({ repo: KEY, repo_root: '/w/repoB' });
+    });
+
+    it('keeps its own remote when no map row names its cwd', () => {
+      leftHeader();
+      sweep(corpus.open(), NO_GIT);
+      expect(codexRow()).toMatchObject({ cwd: '/w/repoB', cwd_git: 0, repo: KEY, repo_root: '/w/repoB' });
+    });
+  });
+
   it('gives a pi session at the same cwd the remote', () => {
     codex(U1, '/w/app');
     corpus.write(corpus.piPath('--w-app--', P1), [piSession(P1, { cwd: '/w/app' }), piUser('hello pi')]);
@@ -109,7 +167,7 @@ describe('implicit rows in the resolver', () => {
   const session = (id: string, cwd: string, remote: string | null, cwdGit: number, end: number | null = null, host = 'laptop') =>
     db.prepare("INSERT INTO sessions(id, project, host, cwd, git_remote, cwd_git, end_time, source) VALUES (?, 'p', ?, ?, ?, ?, ?, 'codex')")
       .run(id, host, cwd, remote, cwdGit, end);
-  const resolve = (cwd: string) => repoResolver(db)({ host: 'laptop', cwd, gitRemote: null });
+  const resolve = (cwd: string) => repoResolver(db)({ host: 'laptop', cwd, gitRemote: null, cwdGit: false });
 
   it('ranks below a real map row, and the most recent remote wins at one cwd, in both paths', () => {
     session('old', '/w/app', 'https://h.example/o/old.git', 1, 100);
