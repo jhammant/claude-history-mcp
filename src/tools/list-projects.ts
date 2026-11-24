@@ -105,7 +105,7 @@ export function handleListProjects(db: DB, args: { sort_by?: string; limit?: num
     else g.members.push({ dir, decoded: !r.cwd, last: r.last ?? 0 });
   }
   // Repository rows by name; two different repositories of one name (or a name another row
-  // already has) are told apart by checkout path, else numbered, as on the report page.
+  // already has) are told apart by checkout path, else by owner, remote or host (see distinctNames).
   const repoGroups = [...groups.values()].filter((g) => g.repo !== null);
   const names = distinctNames(
     repoGroups.map((g) => ({ key: g.repo as string, root: [...g.roots].sort((a, b) => b[1] - a[1])[0]?.[0] ?? null })),

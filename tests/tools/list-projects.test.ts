@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { sweep } from '../../src/indexing/sweep.js';
 import { handleListProjects } from '../../src/tools/list-projects.js';
 import { SearchEngine } from '../../src/search/search-engine.js';
-import { matchProjects } from '../../src/tools/project-match.js';
+import { matchProjects, matchRepos } from '../../src/tools/project-match.js';
 import { assistantText, createCorpus, rolloutMessage, rolloutMeta, userLine, type Corpus } from '../helpers/corpus.js';
 
 describe('list_projects', () => {
@@ -97,7 +97,7 @@ describe('list_projects across hosts', () => {
     sweep(corpus.open(), { probeRepos: false });
   };
 
-  it('lists the same path on two hosts as two rows when neither has a remote', () => {
+  it('lists the same path on two hosts as two rows, told apart by host, when neither has a remote', () => {
     for (const host of ['laptop', 'desktop']) {
       onHost(host, () => corpus.write(corpus.sessionPath('-home-me-app', `s-${host}`), [
         userLine('hello', { cwd: '/home/me/app', sessionId: `s-${host}` }),
@@ -113,8 +113,8 @@ describe('list_projects across hosts', () => {
     expect(out.match(/^- /gm)).toHaveLength(2);
     expect(out).not.toContain('laptop:/');
     expect(out).not.toContain('desktop:/');
-    expect(out).toMatch(/^- app \(1\) — 1 sessions/m);
-    expect(out).toMatch(/^- app \(2\) — 1 sessions/m);
+    expect(out).toMatch(/^- app @desktop — 1 sessions/m);
+    expect(out).toMatch(/^- app @laptop — 1 sessions/m);
     expect(out).toContain('  Hosts: laptop');
     expect(out).toContain('  Hosts: desktop');
   });
@@ -267,5 +267,32 @@ describe('a schema 3 database after its first sweep (hosts unknown, plain path k
 
     expect(new SearchEngine(db).search('gearbox project:app').hits.map((h) => h.sessionId).sort()).toEqual(['a1', 'a2']);
     expect(new SearchEngine(db).search('gearbox', { project: '/work/tools' }).hits.map((h) => h.sessionId)).toEqual(['t1']);
+  });
+});
+
+describe('repositories sharing a name', () => {
+  let corpus: Corpus;
+  beforeEach(() => {
+    corpus = createCorpus();
+    for (const [i, owner] of ['alice', 'team'].entries()) {
+      const u = `0199dddd-0000-7000-8000-00000000000${i}`;
+      corpus.write(corpus.rolloutPath('2026-10-01', u), [
+        rolloutMeta(u, { cwd: '/work/app', repositoryUrl: `https://git.example.com/${owner}/app.git`, timestamp: `2026-10-0${i + 1}T09:00:00Z` }),
+        rolloutMessage('user', 'hello', { timestamp: `2026-10-0${i + 1}T09:00:00Z` }),
+      ]);
+    }
+    sweep(corpus.open());
+  });
+  afterEach(() => corpus.cleanup());
+
+  it('labels them by owner, and the label works as a filter', () => {
+    const text = handleListProjects(corpus.open(), {});
+    expect(text).toMatch(/^- alice\/app — 1 sessions/m);
+    expect(text).toMatch(/^- team\/app — 1 sessions/m);
+    const one = handleListProjects(corpus.open(), { query: 'team/app' });
+    expect(one).toContain('1 project with conversation history matching "team/app":');
+    expect(one).toMatch(/^- team\/app — 1 sessions/m);
+    expect(matchRepos(corpus.open(), 'team/app')).toEqual(['git.example.com/team/app']);
+    expect(matchRepos(corpus.open(), 'TEAM/app')).toEqual(['git.example.com/team/app']);
   });
 });

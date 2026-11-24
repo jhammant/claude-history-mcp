@@ -361,4 +361,56 @@ describe('distinctNames', () => {
     expect(repoName('/home/me/app')).toBe('app');
     expect(repoName('example.com/acme/app')).toBe('app');
   });
+
+  describe('repositories sharing a name', () => {
+    const none = () => null;
+    const labels = (keys: string[], reserved: string[] = []) =>
+      Object.fromEntries(distinctNames(keys.map((key) => ({ key, root: '/w/app' })), none, new Set(reserved)));
+
+    it('tells one repository under two owners apart by owner/name', () => {
+      expect(labels(['git.example.com/alice/app', 'git.example.com/team/app'])).toEqual({
+        'git.example.com/alice/app': 'alice/app',
+        'git.example.com/team/app': 'team/app',
+      });
+    });
+
+    it('tells one owner and name on two remote hosts apart by the full key', () => {
+      expect(labels(['git.example.com/alice/app', 'git.internal.example.com/alice/app'])).toEqual({
+        'git.example.com/alice/app': 'git.example.com/alice/app',
+        'git.internal.example.com/alice/app': 'git.internal.example.com/alice/app',
+      });
+    });
+
+    it('gives a lone owner owner/name and the colliding pair their full keys', () => {
+      expect(labels(['git.example.com/alice/app', 'git.internal.example.com/alice/app', 'git.example.com/team/app'])).toEqual({
+        'git.example.com/team/app': 'team/app',
+        'git.example.com/alice/app': 'git.example.com/alice/app',
+        'git.internal.example.com/alice/app': 'git.internal.example.com/alice/app',
+      });
+    });
+
+    it('tells one path on two hosts apart by host', () => {
+      expect(labels(['hostA:/w/app', 'hostB:/w/app'])).toEqual({ 'hostA:/w/app': 'app @hostA', 'hostB:/w/app': 'app @hostB' });
+    });
+
+    it('numbers path keys with no host that cannot be told apart', () => {
+      expect(labels(['/w/a/app', '/w/b/app'])).toEqual({ '/w/a/app': 'app (1)', '/w/b/app': 'app (2)' });
+    });
+
+    it('still prefers a unique path label', () => {
+      const names = distinctNames(
+        [{ key: 'git.example.com/alice/app', root: '/w/a' }, { key: 'git.example.com/team/app', root: '/w/b' }],
+        (root) => root,
+      );
+      expect([...names.values()].sort()).toEqual(['/w/a', '/w/b']);
+    });
+
+    it('skips a new label another row already has', () => {
+      expect(labels(['git.example.com/alice/app', 'git.example.com/team/app'], ['alice/app'])).toEqual({
+        'git.example.com/alice/app': 'git.example.com/alice/app',
+        'git.example.com/team/app': 'team/app',
+      });
+      expect(labels(['hostA:/w/app', 'hostB:/w/app'], ['app @hostA'])).toEqual({ 'hostA:/w/app': 'app (1)', 'hostB:/w/app': 'app @hostB' });
+    });
+  });
 });

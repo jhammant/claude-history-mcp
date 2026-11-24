@@ -7,15 +7,16 @@ function likeEscape(value: string): string {
 }
 
 /**
- * Resolved repositories (sessions.repo) a caller's text names: the exact key, or part of the
- * repository name (the key's last segment), case-insensitively.
+ * Resolved repositories (sessions.repo) a caller's text names: the exact key, part of the
+ * repository name (the key's last segment), or the end of the key after a "/" (so
+ * "owner/name" finds host/owner/name), case-insensitively.
  */
 export function matchRepos(db: DB, query: string): string[] {
   const q = query.trim().replace(/\/+$/, "");
   if (!q) return [];
   const lower = q.toLowerCase();
   const repos = db.prepare("SELECT DISTINCT repo FROM sessions WHERE repo IS NOT NULL").pluck().all() as string[];
-  return repos.filter((r) => r === q || repoName(r).toLowerCase().includes(lower));
+  return repos.filter((r) => r === q || repoName(r).toLowerCase().includes(lower) || r.toLowerCase().endsWith("/" + lower));
 }
 
 /** A session's place: the machine, its resolved repository, that repository's main root, and its working directory. */

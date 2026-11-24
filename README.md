@@ -144,6 +144,9 @@ database can hold several machines and `list_projects` can show one project once
   and is one repository on every machine. One without a remote is keyed by host and path, so
   the same path on `laptop` and `desktop` is not taken to be one repository unless a git
   remote says so.
+  Two repositories that share a name are listed by checkout path where that tells them
+  apart, else as `owner/name`, the full remote, or `name @host`; a project filter accepts
+  `owner/name` too.
   A project filter reaches every directory of the repositories it matches. The exception is
   a session on the same machine inside another repository's tree, when that repository is
   known by a remote and the session's own repository root does not match the filter: it
