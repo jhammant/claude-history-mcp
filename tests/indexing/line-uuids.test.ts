@@ -349,7 +349,7 @@ describe('one Claude line, one row: forks and sibling subagents', () => {
   });
 
   describe("a fork's own cwd and branch win over the copied lines'", () => {
-    const ctx = "SELECT cwd, git_branch FROM sessions WHERE id = 'w-fork'";
+    const ctx = "SELECT cwd, git_branch, git_remote, cwd_git FROM sessions WHERE id = 'w-fork'";
     /** The fork's own lines, run in a worktree on another branch. */
     const own = stream('w-fork', 500, 60, 'raft').map((l) => ({ ...l, cwd: '/work/wt', gitBranch: 'feat' }));
     /** What the fork's session holds when only its own lines are read. */
@@ -369,7 +369,7 @@ describe('one Claude line, one row: forks and sibling subagents', () => {
       corpus.write(corpus.sessionPath(HOME, 'w-fork'), [...copied(original.slice(2, 9), 'w-fork'), ...own]);
       sweep(corpus.open());
       expect(corpus.open().prepare(ctx).get()).toEqual(ownOnly());
-      expect(corpus.open().prepare(ctx).get()).toMatchObject({ cwd: '/work/wt', git_branch: 'feat' });
+      expect(corpus.open().prepare(ctx).get()).toMatchObject({ cwd: '/work/wt', git_branch: 'feat', cwd_git: 1 });
     });
 
     it('when the copied lines fill the first batch and its own lines come in the next', () => {
@@ -398,13 +398,13 @@ describe('one Claude line, one row: forks and sibling subagents', () => {
       corpus.append(f, own);
       sweep(db);
       expect(db.prepare(ctx).get()).toEqual(ownOnly());
-      const incremental = db.prepare('SELECT id, cwd, git_branch FROM sessions ORDER BY id').all();
+      const incremental = db.prepare('SELECT id, cwd, git_branch, git_remote, cwd_git FROM sessions ORDER BY id').all();
       db.close();
 
       await rebuild(join(corpus.dataDir, 'history.db'));
       db = openDatabase(join(corpus.dataDir, 'history.db'));
       try {
-        expect(db.prepare('SELECT id, cwd, git_branch FROM sessions ORDER BY id').all()).toEqual(incremental);
+        expect(db.prepare('SELECT id, cwd, git_branch, git_remote, cwd_git FROM sessions ORDER BY id').all()).toEqual(incremental);
       } finally {
         db.close();
       }
@@ -420,7 +420,7 @@ describe('one Claude line, one row: forks and sibling subagents', () => {
       corpus.append(f, bare.slice(5));
       sweep(db);
       const incremental = db.prepare(ctx).get();
-      expect(incremental).toMatchObject({ cwd: '/work/app', git_branch: 'main' });
+      expect(incremental).toMatchObject({ cwd: '/work/app', git_branch: 'main', cwd_git: 1 });
       db.close();
 
       await rebuild(join(corpus.dataDir, 'history.db'));

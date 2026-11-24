@@ -56,15 +56,15 @@ const SUBAGENT = {
   source: { subagent: { thread_spawn: { parent_thread_id: PARENT, depth: 1, agent_nickname: 'Scout', agent_role: 'worker' } } },
 };
 
-/** The fork's header: its own cwd and branch, which the parent's must never replace. */
+/** The fork's header: its own cwd, branch and remote, which the parent's must never replace. */
 function forkMeta(extra: Record<string, unknown>, opts: Partial<Opts> = {}): Line {
   return rolloutMeta(FORK, {
-    timestamp: at(0), ...opts, cwd: '/work/app', branch: 'fork-branch', extra,
+    timestamp: at(0), ...opts, cwd: '/work/app', branch: 'fork-branch', repositoryUrl: 'https://git.example.org/team/fork.git', extra,
   }) as Line;
 }
 
 function parentMeta(opts: Opts): Line {
-  return rolloutMeta(PARENT, { ...opts, cwd: '/work/parent', branch: 'parent-branch' }) as Line;
+  return rolloutMeta(PARENT, { ...opts, cwd: '/work/parent', branch: 'parent-branch', repositoryUrl: 'https://git.example.org/team/parent.git' }) as Line;
 }
 
 /** A paginated subagent fork: every line carries its ordinal, and the header names where its own history starts. */
@@ -107,7 +107,7 @@ describe('forked codex rollouts', () => {
 
   const id = `codex-${FORK}`;
   const session = (sid = id) => corpus.open().prepare(
-    'SELECT is_subagent, parent_session, cwd, git_branch, first_prompt, start_time, end_time, message_count FROM sessions WHERE id = ?',
+    'SELECT is_subagent, parent_session, cwd, git_branch, git_remote, first_prompt, start_time, end_time, message_count FROM sessions WHERE id = ?',
   ).get(sid) as Record<string, unknown>;
   const rows = (sid = id) => corpus.open().prepare(
     `SELECT m.role, m.tools, t.prose, t.tool_input FROM messages m JOIN message_text t ON t.id = m.id
@@ -126,7 +126,7 @@ describe('forked codex rollouts', () => {
     expect(r.map((m) => m.tool_input).join('\n')).not.toContain('parent work');
     expect(r.map((m) => m.tool_input).join('\n')).toContain('fork work');
     expect(session()).toMatchObject({
-      cwd: '/work/app', git_branch: 'fork-branch',
+      cwd: '/work/app', git_branch: 'fork-branch', git_remote: 'https://git.example.org/team/fork.git',
       first_prompt: 'fork task', message_count: 4,
     });
     expect(session().start_time).toBeGreaterThanOrEqual(T0 + 1500);

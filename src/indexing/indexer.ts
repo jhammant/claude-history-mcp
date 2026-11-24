@@ -31,6 +31,7 @@ import { extractContent, isLocalCommandEcho, truncate, type ToolResult } from ".
 import { formatOf } from "../formats/registry.js";
 import type { TranscriptFile } from "../parsers/transcript-files.js";
 import { claudeProjectDir, UNKNOWN_PROJECT } from "../utils/path-encoder.js";
+import { stripRemoteCredentials } from "../repos/url.js";
 import { lineKey } from "./line-keys.js";
 import { readLines } from "./line-reader.js";
 
@@ -134,6 +135,7 @@ interface PendingRow {
 }
 
 interface SessionUpdate {
+  gitRemote: string | null;
   minTs: number | null;
   maxTs: number | null;
   added: number;
@@ -142,18 +144,22 @@ interface SessionUpdate {
   firstPrompt: string | null;
   aiTitle: string | null;
   customTitle: string | null;
+  /** 1 when a line at the session's own cwd carried a git branch or remote (only ever raises cwd_git). */
+  cwdGit: number;
   /**
-   * The cwd and branch of lines skipped because another session holds them (a fork's copied
-   * history): used only while the session's own lines have not stated them (see updateSession).
+   * The cwd, branch and remote of lines skipped because another session holds them (a fork's
+   * copied history): used only while the session's own lines have not stated them (see updateSession).
    */
   copiedCwd: string | null;
   copiedBranch: string | null;
+  copiedGitRemote: string | null;
+  copiedCwdGit: number;
 }
 
 function emptyUpdate(): SessionUpdate {
   return {
-    minTs: null, maxTs: null, added: 0, cwd: null, branch: null, firstPrompt: null, aiTitle: null, customTitle: null,
-    copiedCwd: null, copiedBranch: null,
+    gitRemote: null, minTs: null, maxTs: null, added: 0, cwd: null, branch: null, firstPrompt: null, aiTitle: null, customTitle: null,
+    cwdGit: 0, copiedCwd: null, copiedBranch: null, copiedGitRemote: null, copiedCwdGit: 0,
   };
 }
 
@@ -210,6 +216,12 @@ function subagentTitle(file: TranscriptFile): string | null {
 export class RowBuilder {
   readonly finished: PendingRow[] = [];
   update: SessionUpdate = emptyUpdate();
+  /**
+   * The session's own cwd: the stored one when the session has it, else the first cwd read. Git
+   * evidence counts for it only from a line at that cwd, since a session that started in a
+   * folder and moved into a repository records the folder as its cwd and the repository's branch.
+   */
+  sessionCwd: string | null = null;
 
   constructor(
     public pending: PendingRow | null,
@@ -249,9 +261,24 @@ export class RowBuilder {
    */
   private noteContext(obj: Record<string, unknown>): void {
     // A cwd the format states for the whole session (a Codex fork's header) wins over the line's.
-    if (typeof obj.sessionCwd === "string" && obj.sessionCwd && !this.update.cwd) this.update.cwd = obj.sessionCwd;
+    if (typeof obj.sessionCwd === "string" && obj.sessionCwd) {
+      if (!this.update.cwd) this.update.cwd = obj.sessionCwd;
+      if (!this.sessionCwd) this.sessionCwd = obj.sessionCwd;
+    }
     if (typeof obj.cwd === "string" && obj.cwd && !this.update.cwd) this.update.cwd = obj.cwd;
     if (typeof obj.gitBranch === "string" && obj.gitBranch && !this.update.branch) this.update.branch = obj.gitBranch;
+    if (typeof obj.gitRemote === "string" && obj.gitRemote && !this.update.gitRemote) this.update.gitRemote = obj.gitRemote;
+    // A session-level remote on a line at another directory (the Codex header's, see
+    // codex-rollout.ts): the session's remote, but no evidence for this line's cwd.
+    if (typeof obj.sessionGitRemote === "string" && obj.sessionGitRemote && !this.update.gitRemote) {
+      this.update.gitRemote = obj.sessionGitRemote;
+    }
+    const lineCwd = typeof obj.cwd === "string" && obj.cwd ? obj.cwd : null;
+    if (lineCwd && !this.sessionCwd) this.sessionCwd = lineCwd;
+    if (lineCwd && lineCwd === this.sessionCwd &&
+        ((typeof obj.gitBranch === "string" && obj.gitBranch) || (typeof obj.gitRemote === "string" && obj.gitRemote))) {
+      this.update.cwdGit = 1;
+    }
   }
 
   /**
@@ -260,8 +287,14 @@ export class RowBuilder {
    */
   noteCopied(obj: Record<string, unknown>): void {
     const u = this.update;
-    if (typeof obj.cwd === "string" && obj.cwd && !u.copiedCwd) u.copiedCwd = obj.cwd;
+    const lineCwd = typeof obj.cwd === "string" && obj.cwd ? obj.cwd : null;
+    if (lineCwd && !u.copiedCwd) u.copiedCwd = lineCwd;
     if (typeof obj.gitBranch === "string" && obj.gitBranch && !u.copiedBranch) u.copiedBranch = obj.gitBranch;
+    if (typeof obj.gitRemote === "string" && obj.gitRemote && !u.copiedGitRemote) u.copiedGitRemote = obj.gitRemote;
+    if (lineCwd && lineCwd === u.copiedCwd &&
+        ((typeof obj.gitBranch === "string" && obj.gitBranch) || (typeof obj.gitRemote === "string" && obj.gitRemote))) {
+      u.copiedCwdGit = 1;
+    }
   }
 
   addLine(obj: Record<string, unknown>): void {
@@ -396,17 +429,26 @@ function prepare(db: DB) {
          end_time = CASE WHEN @maxTs IS NOT NULL AND (end_time IS NULL OR end_time < @maxTs) THEN @maxTs ELSE end_time END,
          message_count = message_count + @added,
          -- Set once, from the session's own lines. Values from copied lines (context_copied bits
-         -- 1 cwd, 2 branch) only fill a gap, and the session's own value replaces them.
+         -- 1 cwd, 2 branch, 4 remote) only fill a gap, and the session's own value replaces them.
          -- The SET expressions all read the row as it was before this update.
          cwd = CASE WHEN @cwd IS NOT NULL AND (cwd IS NULL OR context_copied & 1) THEN @cwd
                     WHEN cwd IS NULL THEN @copiedCwd ELSE cwd END,
          git_branch = CASE WHEN @branch IS NOT NULL AND (git_branch IS NULL OR context_copied & 2) THEN @branch
                            WHEN git_branch IS NULL THEN @copiedBranch ELSE git_branch END,
+         git_remote = CASE WHEN @gitRemote IS NOT NULL AND (git_remote IS NULL OR context_copied & 4) THEN @gitRemote
+                           WHEN git_remote IS NULL THEN @copiedGitRemote ELSE git_remote END,
+         -- Git evidence at whichever cwd is in use.
+         cwd_git = CASE WHEN @cwd IS NOT NULL AND (cwd IS NULL OR context_copied & 1) THEN @cwdGit
+                        WHEN cwd IS NULL AND @copiedCwd IS NOT NULL THEN @copiedCwdGit
+                        WHEN context_copied & 1 AND @copiedCwd = cwd THEN max(cwd_git, @copiedCwdGit)
+                        ELSE max(cwd_git, @cwdGit) END,
          context_copied =
            (CASE WHEN @cwd IS NOT NULL AND (cwd IS NULL OR context_copied & 1) THEN 0
                  WHEN cwd IS NULL AND @copiedCwd IS NOT NULL THEN 1 ELSE context_copied & 1 END) |
            (CASE WHEN @branch IS NOT NULL AND (git_branch IS NULL OR context_copied & 2) THEN 0
-                 WHEN git_branch IS NULL AND @copiedBranch IS NOT NULL THEN 2 ELSE context_copied & 2 END),
+                 WHEN git_branch IS NULL AND @copiedBranch IS NOT NULL THEN 2 ELSE context_copied & 2 END) |
+           (CASE WHEN @gitRemote IS NOT NULL AND (git_remote IS NULL OR context_copied & 4) THEN 0
+                 WHEN git_remote IS NULL AND @copiedGitRemote IS NOT NULL THEN 4 ELSE context_copied & 4 END),
          -- A session keeps the host it was first indexed from; only an unknown one is filled.
          host = CASE WHEN host = '' THEN @host ELSE host END,
          first_prompt = coalesce(first_prompt, @firstPrompt),
@@ -564,6 +606,7 @@ export function indexFile(db: DB, file: TranscriptFile, options: IndexFileOption
     const builder = new RowBuilder(
       pending, snap.maxSeq === null ? 0 : snap.maxSeq + 1, !!session.first_prompt, parsePendingTools(snap.state?.pending_tools),
     );
+    builder.sessionCwd = (session.context_copied & COPIED_CWD) !== 0 ? null : session.cwd;
     const tr = format.translator(file, offset > 0);
     let head = row?.head ?? "";
     // The session's cwd, as far as it is known; a project the path does not carry starts as
@@ -663,7 +706,12 @@ export function indexFile(db: DB, file: TranscriptFile, options: IndexFileOption
             }
             r.dirty = false;
           }
-          s.updateSession.run({ ...update, added, host, sid: session.sid });
+          // A remote's credentials never reach the database.
+          s.updateSession.run({
+            ...update, gitRemote: update.gitRemote ? stripRemoteCredentials(update.gitRemote) : null,
+            copiedGitRemote: update.copiedGitRemote ? stripRemoteCredentials(update.copiedGitRemote) : null,
+            added, host, sid: session.sid,
+          });
           const tail = builder.pending;
           const tailState = {
             tailRowid: tail?.rowid ?? null, tailMsgId: tail?.msgId ?? null, pendingTools: serializePendingTools(builder.calls),

@@ -291,7 +291,8 @@ export function outputIsError(text: string): boolean {
 class RolloutTranslator implements LineTranslator {
   private cwd: string | null = null;
   private branch: string | null = null;
-  /** The header's cwd: its git branch describes that directory only. */
+  private remote: string | null = null;
+  /** The header's cwd: its git branch and remote describe that directory only. */
   private headerCwd: string | null = null;
   private guardian = false;
   /** Distinguishes this read's turn ids from an earlier read's, so a reopened row is never matched by accident. */
@@ -338,12 +339,15 @@ class RolloutTranslator implements LineTranslator {
     if (typeof payload.cwd === "string" && payload.cwd) this.cwd = this.headerCwd = payload.cwd;
     const git = asRecord(payload.git);
     if (typeof git?.branch === "string" && git.branch) this.branch = git.branch;
+    if (typeof git?.repository_url === "string" && git.repository_url) this.remote = git.repository_url;
   }
 
   /**
-   * Line fields. The header's git branch is attached only to a line at the header's cwd: on
-   * a line at another directory (a turn_context cwd, an exec workdir) it would describe a
-   * directory that may not be on that branch.
+   * Line fields. The header's git branch and remote are attached only to a line at the
+   * header's cwd: on a line at another directory (a turn_context cwd, an exec workdir) they
+   * would claim git evidence for a directory that may not be a work tree. Such a line carries
+   * the remote as sessionGitRemote instead, which the indexer keeps as the session's remote
+   * without counting it as evidence for that line's cwd.
    */
   private base(obj: Record<string, unknown>, cwd = this.cwd): ClaudeLine {
     const atHeader = !!cwd && cwd === this.headerCwd;
@@ -353,6 +357,8 @@ class RolloutTranslator implements LineTranslator {
       // A fork's first own line is often a call at an exec workdir: the session's cwd is its header's.
       ...(this.fork && this.headerCwd ? { sessionCwd: this.headerCwd } : {}),
       ...(atHeader && this.branch ? { gitBranch: this.branch } : {}),
+      ...(atHeader && this.remote ? { gitRemote: this.remote } : {}),
+      ...(!atHeader && this.remote ? { sessionGitRemote: this.remote } : {}),
     };
   }
 
