@@ -147,6 +147,41 @@ describe('list_projects across hosts', () => {
     expect(out).toContain('Hosts: laptop');
   });
 
+  it('folds a repository-less session into the repository of its project dir on the same host', () => {
+    for (const id of ['r1', 'r2']) {
+      onHost('laptop', () => corpus.write(corpus.sessionPath('-home-me-app', id), [
+        userLine('hello', { cwd: '/home/me/app', sessionId: id }),
+        assistantText('hi', { cwd: '/home/me/app', sessionId: id }),
+      ]));
+    }
+    corpus.open().prepare("UPDATE sessions SET repo = NULL, repo_root = NULL WHERE id = 'r2'").run();
+
+    const out = handleListProjects(corpus.open(), {});
+
+    expect(out.match(/^- /gm)).toHaveLength(1);
+    expect(out).toMatch(/^- app — 2 sessions, 4 messages/m);
+  });
+
+  it('does not fold a repository-less session of another host into the repository', () => {
+    onHost('laptop', () => corpus.write(corpus.sessionPath('-home-me-app', 'l1'), [
+      userLine('hello', { cwd: '/home/me/app', sessionId: 'l1' }),
+      assistantText('hi', { cwd: '/home/me/app', sessionId: 'l1' }),
+    ]));
+    onHost('desktop', () => corpus.write(corpus.sessionPath('-home-me-app', 'd1'), [
+      userLine('hello', { cwd: '/home/me/app', sessionId: 'd1' }),
+      assistantText('hi', { cwd: '/home/me/app', sessionId: 'd1' }),
+    ]));
+    corpus.open().prepare("UPDATE sessions SET repo = NULL, repo_root = NULL WHERE id = 'd1'").run();
+
+    const out = handleListProjects(corpus.open(), {});
+
+    expect(out.match(/^- /gm)).toHaveLength(2);
+    expect(out).toMatch(/^- app — 1 sessions, 2 messages/m);
+    expect(out).toContain('  Hosts: laptop');
+    expect(out).toContain('  Hosts: desktop');
+    expect(out).not.toContain('Hosts: desktop, laptop');
+  });
+
   it('still counts a Claude session with no messages', () => {
     onHost('laptop', () => corpus.write(corpus.sessionPath('-home-me-quiet', 'q'), [
       userLine('', { cwd: '/home/me/quiet', sessionId: 'q', isMeta: true }),

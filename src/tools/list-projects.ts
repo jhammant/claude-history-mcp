@@ -6,6 +6,7 @@ import { decodeProjectPath } from "../utils/path-encoder.js";
 
 interface DirRow {
   project: string;
+  host: string;
   cwd: string | null;
   repo: string | null;
   root: string | null;
@@ -50,32 +51,35 @@ const MEMBERS_SHOWN = 5;
 export function handleListProjects(db: DB, args: { sort_by?: string; limit?: number; query?: string }): string {
   const dirs = db
     .prepare(
-      `SELECT project, cwd, repo, max(repo_root) AS root,
+      `SELECT project, host, cwd, repo, max(repo_root) AS root,
          sum(is_subagent = 0) AS sessions, sum(is_subagent) AS subagents,
          sum(message_count) AS messages, min(start_time) AS first, max(end_time) AS last
-       FROM sessions WHERE source = 'claude' OR message_count > 0 GROUP BY project, cwd, repo`
+       FROM sessions WHERE source = 'claude' OR message_count > 0 GROUP BY project, host, cwd, repo`
     )
     .all() as DirRow[];
   // Per source: top-level sessions with at least one message. Subagent runs and empty Codex guardian-review
   // threads are left out so the breakdown matches the headline's top-level scope.
   const sourceRows = db
     .prepare(
-      `SELECT project, repo, source, count(*) AS n FROM sessions WHERE (source = 'claude' OR message_count > 0) AND is_subagent = 0
-       GROUP BY project, repo, source`
+      `SELECT project, host, repo, source, count(*) AS n FROM sessions WHERE (source = 'claude' OR message_count > 0) AND is_subagent = 0
+       GROUP BY project, host, repo, source`
     )
-    .all() as Array<{ project: string; repo: string | null; source: string; n: number }>;
+    .all() as Array<{ project: string; host: string; repo: string | null; source: string; n: number }>;
   if (dirs.length === 0) return "No projects with conversation history found.";
 
   // A session with no repository (one that never saw a working directory) joins the repository
-  // of its project dir when exactly one repository has sessions there, as it was counted with them before.
+  // of its project dir when exactly one repository has sessions there on the same host (one host's
+  // evidence never applies to another), as it was counted with them before.
   const soleRepo = new Map<string, string | null>();
+  const soleKey = (r: { project: string; host: string }) => `${r.host}\0${r.project}`;
   for (const r of dirs) {
     if (r.repo === null) continue;
-    const have = soleRepo.get(r.project);
-    soleRepo.set(r.project, have === undefined || have === r.repo ? r.repo : null);
+    const have = soleRepo.get(soleKey(r));
+    soleRepo.set(soleKey(r), have === undefined || have === r.repo ? r.repo : null);
   }
-  const keyOf = (r: { project: string; repo: string | null }) => {
-    const repo = r.repo ?? soleRepo.get(r.project) ?? null;
+  const repoOf = (r: { project: string; host: string; repo: string | null }) => r.repo ?? soleRepo.get(soleKey(r)) ?? null;
+  const keyOf = (r: { project: string; host: string; repo: string | null }) => {
+    const repo = repoOf(r);
     return repo !== null ? `r\0${repo}` : `p\0${r.project}`;
   };
   const groups = new Map<string, Group>();
@@ -83,7 +87,7 @@ export function handleListProjects(db: DB, args: { sort_by?: string; limit?: num
     const key = keyOf(r);
     let g = groups.get(key);
     if (!g) {
-      const repo = r.repo ?? soleRepo.get(r.project) ?? null;
+      const repo = repoOf(r);
       const name = repo !== null ? "" : projectName(r.project, r.cwd); // repositories are named below
       groups.set(key, (g = { name, repo, hosts: new Set(), roots: new Map(), members: [], projects: new Set(), cwds: new Set(), sessions: 0, subagents: 0, messages: 0, first: null, last: null }));
     }
