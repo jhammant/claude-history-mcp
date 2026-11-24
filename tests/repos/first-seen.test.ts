@@ -83,7 +83,8 @@ describe('resolution does not depend on the order directories are first seen', (
     // as a session indexed before hosts were recorded, then resolved by a full pass
     db.prepare("UPDATE sessions SET host = '', repo = '/work/d'").run();
     corpus.append(path, [userLine('again', { cwd: '/work/d', sessionId: 'old' })]);
-    sweep(db, NO_GIT);
+    topUp(db, 10_000); // a top-up never clears the flag
+    expect(getMeta(db, REPO_NEW_DIR_KEY)).toBeDefined();
     expect(db.prepare("SELECT host FROM sessions WHERE id = 'old'").pluck().get()).toBe('laptop');
     expect(repo('old')).toEqual({ repo: 'laptop:/work/d', repo_root: '/work/d' });
   });
@@ -94,7 +95,8 @@ describe('resolution does not depend on the order directories are first seen', (
     sweep(db, NO_GIT);
     process.env.CLAUDE_HISTORY_HOST = 'desktop';
     session('-work-d', 'desk-main', '/work/d');
-    sweep(db, NO_GIT);
+    topUp(db, 10_000); // a top-up never clears the flag
+    expect(getMeta(db, REPO_NEW_DIR_KEY)).toBeDefined();
     expect(repo('desk-main')).toEqual({ repo: 'desktop:/work/d', repo_root: '/work/d' });
   });
 });
