@@ -61,9 +61,11 @@ export declare function lastSegment(path: string): string;
 export declare function repoName(key: string): string;
 /**
  * Display names for repositories, unique where two different ones share a name: each of
- * those is shown by its path (`pathLabel` of its root, when that is unique among them),
- * else as "name (1)", "name (2)" in key order. A name in `reserved` (another row's label)
- * counts as shared too.
+ * those is shown by its path (`pathLabel` of its root, when that is unique among them).
+ * Failing that, the first of these that no other repository of the name wants at the same
+ * step: `owner/name` for a remote key, then the full remote key, or `name @host` for a path
+ * key with a host; else "name (1)", "name (2)" in key order. A name in `reserved` (another
+ * row's label) counts as shared too, and is never used as a label.
  */
 export declare function distinctNames(repos: Iterable<{
     key: string;

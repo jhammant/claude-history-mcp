@@ -77,11 +77,21 @@ export function repoName(key) {
 function repoEvidence(source) {
     return (dir) => source.mapped(dir) || source.gitSession(dir);
 }
+function keyParts(key) {
+    const path = /^([^/]*):(?=\/)/.exec(key);
+    if (path)
+        return { remote: false, host: path[1] };
+    if (key.startsWith("/"))
+        return { remote: false, host: "" };
+    return { remote: true, ownerName: key.split("/").slice(-2).join("/") };
+}
 /**
  * Display names for repositories, unique where two different ones share a name: each of
- * those is shown by its path (`pathLabel` of its root, when that is unique among them),
- * else as "name (1)", "name (2)" in key order. A name in `reserved` (another row's label)
- * counts as shared too.
+ * those is shown by its path (`pathLabel` of its root, when that is unique among them).
+ * Failing that, the first of these that no other repository of the name wants at the same
+ * step: `owner/name` for a remote key, then the full remote key, or `name @host` for a path
+ * key with a host; else "name (1)", "name (2)" in key order. A name in `reserved` (another
+ * row's label) counts as shared too, and is never used as a label.
  */
 export function distinctNames(repos, pathLabel, reserved = new Set()) {
     const byName = new Map();
@@ -100,11 +110,33 @@ export function distinctNames(repos, pathLabel, reserved = new Set()) {
             continue;
         }
         list.sort((x, y) => x.key.localeCompare(y.key));
-        const paths = list.map((r) => (r.root ? pathLabel(r.root) : null));
+        const taken = new Set(reserved);
+        taken.add(name);
+        const steps = [
+            (r) => (r.root ? pathLabel(r.root) : null),
+            (r) => { const k = keyParts(r.key); return k.remote ? k.ownerName : null; },
+            (r) => (keyParts(r.key).remote ? r.key : null),
+            (r) => { const k = keyParts(r.key); return !k.remote && k.host !== "" ? `${name} @${k.host}` : null; },
+        ];
+        let pending = list;
+        for (const step of steps) {
+            const wanted = pending.map(step);
+            pending = pending.filter((r, i) => {
+                const label = wanted[i];
+                if (label === null || taken.has(label) || wanted.filter((w) => w === label).length !== 1)
+                    return true;
+                out.set(r.key, label);
+                return false;
+            });
+            for (const r of list) {
+                const label = out.get(r.key);
+                if (label !== undefined)
+                    taken.add(label);
+            }
+        }
         list.forEach((r, i) => {
-            const path = paths[i];
-            const unique = path !== null && path !== name && !reserved.has(path) && paths.filter((p) => p === path).length === 1;
-            out.set(r.key, unique ? path : `${name} (${i + 1})`);
+            if (!out.has(r.key))
+                out.set(r.key, `${name} (${i + 1})`);
         });
     }
     return out;
