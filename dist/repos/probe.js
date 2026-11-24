@@ -105,58 +105,68 @@ function logicalTop(dir, top) {
     // The text check is not proof: the candidate must really be this work tree.
     return git(["-C", logical, "rev-parse", "--show-toplevel"]) === top ? logical : null;
 }
-function key(dir, root, remote) {
-    return JSON.stringify([dir, root, remote]);
+/** What a map line says about its directory: root and remote, as compared before appending. */
+function value(root, remote) {
+    return JSON.stringify([root, remote]);
 }
-/** Keys of the entries already in the file; unparseable lines are ignored. */
-function existingKeys(file) {
-    const keys = new Set();
+/**
+ * The newest line per directory already in the file, as the loader picks it (the highest `at`;
+ * on a tie the earlier line). Unparseable lines, and lines without a numeric `at`, are ignored.
+ */
+function newestLines(file) {
+    const newest = new Map();
     let text;
     try {
         text = readFileSync(file, "utf8");
     }
     catch {
-        return keys;
+        return newest;
     }
     for (const line of text.split("\n")) {
         if (!line.trim())
             continue;
         try {
             const o = JSON.parse(line);
-            if (o && typeof o === "object" && typeof o.dir === "string" && typeof o.root === "string") {
-                keys.add(key(o.dir, o.root, typeof o.remote === "string" && o.remote ? o.remote : null));
+            if (o && typeof o === "object" && typeof o.dir === "string" && typeof o.root === "string" &&
+                typeof o.at === "number" && Number.isFinite(o.at)) {
+                const prior = newest.get(o.dir);
+                if (!prior || o.at > prior.at) {
+                    newest.set(o.dir, { value: value(o.root, typeof o.remote === "string" && o.remote ? o.remote : null), at: o.at });
+                }
             }
         }
         catch {
             // corrupt line
         }
     }
-    return keys;
+    return newest;
 }
 /**
- * Probe each directory and append every entry not already in `<mapDir>/<host>.jsonl`.
- * Returns the number of lines added. Never throws.
+ * Probe each directory and append every entry that differs from the newest line for its
+ * directory in `<mapDir>/<host>.jsonl` (or has none). Returns the number of lines added. Never
+ * throws. Only a map directory created here gets mode 0700; an existing one keeps its mode.
  */
 export function recordRepos(dirs, options = {}) {
     try {
         const mapDir = options.mapDir ?? CONFIG.repoMapDir;
         const file = join(mapDir, `${options.host ?? CONFIG.host}.jsonl`);
         const at = Math.floor(options.now ?? Date.now() / 1000);
-        let seen = null;
+        let newest = null;
         let added = 0;
         for (const dir of dirs) {
             for (const entry of probeRepo(dir)) {
-                if (!seen) {
-                    mkdirSync(mapDir, { recursive: true, mode: 0o700 });
-                    chmodSync(mapDir, 0o700);
-                    seen = existingKeys(file);
+                if (!newest) {
+                    if (mkdirSync(mapDir, { recursive: true, mode: 0o700 }) !== undefined)
+                        chmodSync(mapDir, 0o700);
+                    newest = newestLines(file);
                 }
-                const k = key(entry.dir, entry.root, entry.remote);
-                if (seen.has(k))
+                const v = value(entry.root, entry.remote);
+                const prior = newest.get(entry.dir);
+                if (prior && prior.value === v)
                     continue;
                 appendFileSync(file, JSON.stringify({ dir: entry.dir, root: entry.root, remote: entry.remote, at }) + "\n", { mode: 0o600 });
                 chmodSync(file, 0o600);
-                seen.add(k);
+                newest.set(entry.dir, { value: v, at });
                 added++;
             }
         }

@@ -127,7 +127,8 @@ function runStatus(args) {
         // Per source, leaving out Codex and pi sessions with no messages (Codex guardian-review threads); every Claude
         // session counts. Unlike list_projects, these counts include subagent runs. The headline total is the sum of
         // them, so the two always add up.
-        const sourceRows = db.prepare("SELECT source, count(*) AS n FROM sessions WHERE source = 'claude' OR message_count > 0 GROUP BY source").all();
+        const counted = "source = 'claude' OR message_count > 0";
+        const sourceRows = db.prepare(`SELECT source, count(*) AS n FROM sessions WHERE ${counted} GROUP BY source`).all();
         const sessionsBySource = SOURCES.map((source) => ({ source, sessions: sourceRows.find((r) => r.source === source)?.n ?? 0 }));
         const messages = db.prepare("SELECT count(*) AS messages, min(ts) AS oldest, max(ts) AS newest FROM messages").get();
         const { all, changed } = changedTranscripts(db);
@@ -164,9 +165,10 @@ function runStatus(args) {
             console.log(JSON.stringify(status));
             return 0;
         }
-        const hostRows = db.prepare("SELECT host, count(*) AS n FROM sessions GROUP BY host ORDER BY n DESC, host").all();
+        // The same sessions as the Sessions line (empty Codex and pi threads left out), so the two add up.
+        const hostRows = db.prepare(`SELECT host, count(*) AS n FROM sessions WHERE ${counted} GROUP BY host ORDER BY n DESC, host`).all();
         const hostsLine = hostRows.some((r) => r.host !== "")
-            ? [`Hosts: ${hostRows.map((r) => (r.host ? `${r.host} (${n(r.n)} sessions)` : `unknown (${n(r.n)})`)).join(", ")}`]
+            ? [`Hosts: ${hostRows.map((r) => `${r.host || "unknown"} (${n(r.n)} sessions)`).join(", ")}`]
             : [];
         console.log([
             `Database: ${status.database} (${bytes(status.bytes)})`,

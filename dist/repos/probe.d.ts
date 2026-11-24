@@ -15,8 +15,9 @@ export interface MapEntry {
  */
 export declare function probeRepo(dir: string): MapEntry[];
 /**
- * Probe each directory and append every entry not already in `<mapDir>/<host>.jsonl`.
- * Returns the number of lines added. Never throws.
+ * Probe each directory and append every entry that differs from the newest line for its
+ * directory in `<mapDir>/<host>.jsonl` (or has none). Returns the number of lines added. Never
+ * throws. Only a map directory created here gets mode 0700; an existing one keeps its mode.
  */
 export declare function recordRepos(dirs: Iterable<string>, options?: {
     mapDir?: string;

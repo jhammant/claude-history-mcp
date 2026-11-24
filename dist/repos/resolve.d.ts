@@ -1,9 +1,10 @@
 /**
  * Which repository a session belongs to. Four facts, in order of trust: the session's own
- * git remote (Codex records it), the pushed directory map, the remote of another session
- * that ran at exactly the same directory with git evidence there (an implicit map row), and
- * path patterns for well-known worktree layouts; the working directory itself is the last
- * resort.
+ * git remote when it was seen at the session's cwd (Codex records one), the pushed directory
+ * map, the remote of another session that ran at exactly the same directory with git evidence
+ * there (an implicit map row), and path patterns for well-known worktree layouts; the working
+ * directory itself is the last resort. A session remote seen at another directory ranks below
+ * the map: it is used only when no map row names the cwd.
  *
  * Every fact but a remote is scoped by host: a path names a directory on one machine, so the
  * same path on two machines is never assumed to be the same repository. A repository with a
@@ -24,6 +25,12 @@ export interface ResolveInput {
     host: string;
     cwd: string | null;
     gitRemote: string | null;
+    /**
+     * sessions.cwd_git: true when git evidence (a branch or remote) was seen on a line at the
+     * session's cwd. A remote without it describes another directory (a Codex header cwd the
+     * session left), so a map row for the cwd wins over it.
+     */
+    cwdGit: boolean;
 }
 /** True when there is evidence that a directory is a repository (on the host being resolved). */
 export type RepoDirTest = (dir: string) => boolean;
