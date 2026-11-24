@@ -55,15 +55,15 @@ for a JSON array. It reads two small indexed tables and takes a few tens of mill
 ## How It Works
 
 ```text
-~/.claude/projects/**.jsonl   ──┐   sweep (nightly)        ┌───────────────────────────┐
-  sessions + subagent runs      ├──────────────────────────▶ ~/.claude-history-mcp/     │
-~/.codex/sessions, ~/.pi/…   ──┘   top-up (at query time,  │   history.db  (SQLite)    │
-  projects/**.jsonl                 ≤300 ms, newest first)  │   messages + FTS5 index   │
-                                                            │   sessions, summaries,    │
-                                                            │   knowledge               │
-                                                            └─────────────▲─────────────┘
-                                                                          │ read
-                                              one MCP server per Claude Code / Codex session
+~/.claude/projects/**.jsonl           ──┐  sweep (nightly)         ┌───────────────────────────┐
+  sessions + subagent runs              │                          │ ~/.claude-history-mcp/    │
+~/.codex/transcript-feed/projects/    ──┤  top-up (at query time,─▶│   history.db  (SQLite)    │
+~/.codex/sessions/**/rollout-*.jsonl  ──┤  ≤300 ms, newest first)  │   messages + FTS5 index   │
+~/.pi/agent/sessions/**.jsonl         ──┘                          │   sessions, summaries,    │
+                                                                   │   knowledge               │
+                                                                   └─────────────▲─────────────┘
+                                                                                │ read
+                                                      one MCP server per Claude Code / Codex / pi session
 ```
 
 **Transcripts.** Claude Code saves every conversation as JSONL under `~/.claude/projects/`
@@ -71,7 +71,9 @@ for a JSON array. It reads two small indexed tables and takes a few tens of mill
 directly from `~/.codex/sessions/` and pi session files from `~/.pi/agent/sessions/`;
 the older Codex feed (`~/.codex/transcript-feed/projects/`) is still read if present.
 Codex and pi sessions get their project from the working directory they recorded, and
-sit in the same database as `source = codex` and `source = pi`.
+sit in the same database as `source = codex` and `source = pi`. If a Codex session exists as
+both a feed file and a rollout (the same `codex-<id>`), the file indexed first feeds it and the
+other is skipped, so its messages are stored once.
 A forked Codex session (a subagent, or a resumed copy) starts by replaying its parent's
 history; the replay is skipped, so only the fork's own messages are indexed under it.
 
@@ -89,14 +91,14 @@ again from the start. Two indexers working on one file at once cannot insert any
 twice: each batch re-checks the stored offset inside its write transaction.
 
 **Each Claude line once.** Claude Code copies a session's history into the file of a session
-it forks, and the same session file can sit under two spellings of one project path (a
-directory reached through two paths). Every user and assistant line has a `uuid`; the database records each
-one it has indexed and skips a line it already holds, so a search finds that text once, in
-the session that had it first. The sweep reads files in a fixed order (the oldest first) so
-a sweep and a rebuild agree on which session that is. The skipped lines are counted in the
-sweep's output. A fork keeps its own first prompt and times; where it ran (working directory
-and branch) is taken from the lines it copied only if its own lines do not say. Upgrading
-from version 2 keeps what is already indexed; run `rebuild` once to record every uuid.
+it forks, and one session file can sit under two spellings of a project path. Each user and
+assistant line has a `uuid`; the database remembers the ones it has indexed and skips a line
+it already holds. A forked session therefore keeps only its own lines: the shared history is
+found under the session that had it first (the sweep reads the oldest files first, so a sweep
+and a rebuild agree). Its first prompt and times are its own, and its working directory and
+branch come from the copied lines only when its own lines do not say. The sweep output counts
+the lines it skipped. Upgrading from version 2 in place keeps what is indexed, and does not
+remove duplicates already in the database; run `rebuild` once to do that (sessions whose transcripts are gone are kept as they are).
 
 **Nothing runs in the background.** There is no daemon, watcher or timer. Freshness comes
 from the scheduled sweep, plus a short top-up a server may do before a search (transcripts
