@@ -78,16 +78,16 @@ export function createServer(options = {}) {
     };
     server.server.onclose = close;
     server.tool("search_history", [
-        "Full-text search of past Claude Code and Codex conversations (prose, commands, file paths, tool output).",
+        "Full-text search of past Claude Code, Codex and pi conversations (prose, commands, file paths, tool output).",
         "Returns one line per session: project, date, session id, role and message number, and a snippet around the matched words (**bold**).",
         "Query tips: all words must match (falls back to partial matches when too few); \"quoted phrase\"; a OR b;",
         "identifiers like index.msgpack, ERR_SQLITE_ERROR or src/server.ts work as typed.",
-        "Filters in the query: project:name branch:name tool:Bash role:user|assistant|tool source:claude|codex",
+        "Filters in the query: project:name branch:name tool:Bash role:user|assistant|tool source:claude|codex|pi",
         "session:<id> after:7d before:2026-01-15 (h/d/w/m/y or ISO dates).",
         "Then call read_session(session_id, around=<#>) to read what happened.",
     ].join(" "), {
         query: z.string().describe("Search words, phrases and filters, e.g. 'sqlite busy timeout project:myapp after:30d'"),
-        project: z.string().optional().describe("Limit to a project (name, part of a name, or path)"),
+        project: z.string().optional().describe("Limit to a project (name, part of a name, path or repository)"),
         limit: z.number().optional().describe("Most sessions to return (default 10, max 50)"),
         include_context: z.boolean().optional().describe("Also show the message just before and after each hit (default false)"),
         sort: z.enum(["relevance", "recent"]).optional().describe("relevance (default) or recent (newest first)"),
@@ -103,10 +103,10 @@ export function createServer(options = {}) {
         freshness.line(db);
         return readSession(db, args);
     }));
-    server.tool("list_projects", "List projects with Claude Code or Codex history: sessions, messages, subagent runs and active dates.", {
+    server.tool("list_projects", "List repositories (and projects with no repository) with Claude Code, Codex or pi history: sessions, messages, subagent runs, directories and active dates. One row per repository.", {
         sort_by: z.enum(["recent", "sessions", "messages", "name"]).optional().describe("Sort order (default: recent)"),
         limit: z.number().optional().describe("Maximum projects to list (default: 30, max: 200)"),
-        query: z.string().optional().describe("Only projects whose path contains this text"),
+        query: z.string().optional().describe("Only rows whose name or a directory contains this text"),
     }, async (args) => withDatabase((db) => handleListProjects(db, args)));
     server.tool("find_solutions", "Find how an error or problem was solved before. Pass the error text (an error code or the key line works best); hits whose session goes on to say it was fixed rank first, plus any extracted fixes.", {
         error_or_problem: z.string().describe("The error message, problem description, or issue to find solutions for"),
@@ -114,14 +114,14 @@ export function createServer(options = {}) {
     }, async (args) => withDatabase((db) => handleFindSolutions(db, new SearchEngine(db), args, { currentProject, freshness: freshness.line(db) })));
     server.tool("get_session_summary", "Summarise one session: project, branch, time span, tools used, opening request and the last few requests. Give a session id, or a project for its most recent session.", {
         session_id: z.string().optional().describe("Specific session id"),
-        project: z.string().optional().describe("Project name or path. Returns summary of most recent session."),
+        project: z.string().optional().describe("Project name, part of a name, path or repository. Returns summary of most recent session."),
     }, async (args) => withDatabase((db) => handleGetSessionSummary(db, args)));
     server.tool("get_project_context", "Context for a project: recent sessions with their topics, and decisions and fixes extracted from them. Defaults to the current working directory.", {
-        project: z.string().optional().describe("Project name or path. Defaults to current working directory."),
+        project: z.string().optional().describe("Project name, part of a name, path or repository. Defaults to current working directory."),
         depth: z.enum(["brief", "normal", "detailed"]).optional().describe("Detail level (default: normal)"),
     }, async (args) => withDatabase((db) => handleGetProjectContext(db, args, cwd)));
     server.tool("find_patterns", "Recurring patterns in what was asked: common topics, when work happens, repeated issues. Optionally for one project.", {
-        project: z.string().optional().describe("Limit to a specific project"),
+        project: z.string().optional().describe("Limit to a specific project (name, part of a name, path or repository)"),
         type: z.enum(["topics", "workflows", "issues", "all"]).optional().describe("Type of patterns to find (default: all)"),
     }, async (args) => withDatabase((db) => handleFindPatterns(db, args)));
     return { server, close };

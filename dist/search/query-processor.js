@@ -2,11 +2,12 @@
  * Parse what a user or model types into filters and search terms, and turn the terms
  * into FTS5 MATCH expressions that can never be a syntax error.
  *
- *   project:name  branch:name  tool:Bash  role:user|assistant|tool  source:claude|codex
+ *   project:name  branch:name  tool:Bash  role:user|assistant|tool  source:claude|codex|pi
  *   session:<id or prefix>  before:<date>  after:<date>   (dates: 7d, 2w, 3m, 1y, 2026-01-15)
  *   "an exact phrase"   a OR b   index.msgpack (punctuated terms become phrases)
  */
-const FILTER_KEYS = new Set(["project", "before", "after", "tool", "branch", "role", "source", "session"]);
+import { SOURCES } from "../formats/types.js";
+const FILTER_KEYS = new Set(["project", "before", "after", "tool", "branch", "role", "source", "session", "host"]);
 const MAX_GROUPS = 16;
 /** Same characters FTS5's unicode61 tokenizer keeps inside a token. */
 const TOKEN = /[\p{L}\p{N}\p{M}\p{Co}]+/gu;
@@ -89,6 +90,7 @@ function applyFilter(filters, key, value) {
         case "tool":
         case "branch":
         case "session":
+        case "host":
             filters[key] = value;
             return true;
         case "before":
@@ -108,7 +110,7 @@ function applyFilter(filters, key, value) {
         }
         case "source": {
             const source = value.toLowerCase();
-            if (source !== "claude" && source !== "codex")
+            if (!SOURCES.includes(source))
                 return false;
             filters.source = source;
             return true;

@@ -1,18 +1,126 @@
 import type { DB } from "../db/database.js";
-import { encodeProjectPath } from "../utils/path-encoder.js";
+import { dbRepoEvidence, isPathKey, pathKeyHost, repoName } from "../repos/resolve.js";
+import { claudeProjectDir, encodeProjectPath } from "../utils/path-encoder.js";
 
 function likeEscape(value: string): string {
   return value.replace(/[\\%_]/g, (c) => "\\" + c);
 }
 
+/** A project filter as it is matched: trailing slashes dropped, except that a bare "/" stays. */
+export function projectFilterText(filter: string): string {
+  return filter.replace(/\/+$/, "") || (filter.startsWith("/") ? "/" : filter);
+}
+
 /**
- * Encoded project dirs matching what a caller typed: a path (exact dir, or dirs beneath
- * it), an encoded dir, or part of a name ("ghostty" matches -Users-me-dev-ghostty).
+ * Resolved repositories (sessions.repo) a caller's text names: the exact key, part of the
+ * repository name (the key's last segment), or the end of the key after a "/" (so
+ * "owner/name" finds host/owner/name; a path key matches by its tail too), case-insensitively.
+ * The label "name @host" (how list_projects tells one path on two machines apart) names the
+ * path-key repositories called exactly `name` on that host.
  */
-export function matchProjects(db: DB, query: string): string[] {
-  const q = query.trim();
+export function matchRepos(db: DB, query: string): string[] {
+  const q = query.trim().replace(/\/+$/, "");
   if (!q) return [];
-  const encoded = q.includes("/") ? encodeProjectPath(q.replace(/\/+$/, "")) : q;
+  const lower = q.toLowerCase();
+  const repos = db.prepare("SELECT DISTINCT repo FROM sessions WHERE repo IS NOT NULL").pluck().all() as string[];
+  const labelled = /^(.+?)\s+@(\S+)$/.exec(q);
+  const name = labelled?.[1].toLowerCase();
+  const host = labelled?.[2].toLowerCase();
+  return repos.filter(
+    (r) =>
+      r === q ||
+      repoName(r).toLowerCase().includes(lower) ||
+      r.toLowerCase().endsWith("/" + lower) ||
+      (labelled !== null && pathKeyHost(r)?.toLowerCase() === host && repoName(r).toLowerCase() === name),
+  );
+}
+
+/** A session's place: the machine, its resolved repository, that repository's main root, and its working directory. */
+interface Placed {
+  host: string;
+  repo: string | null;
+  repo_root: string | null;
+  cwd: string | null;
+}
+
+const trimRoot = (p: string): string => p.replace(/\/+$/, "");
+
+/**
+ * The repositories whose sessions a project filter expands to. Each directly matched
+ * session anchors its repository (all of that repository's sessions then match too), unless
+ * it sits inside a different repository that the filter is about. It then does not anchor,
+ * and still matches directly. A session does not anchor when all of these hold:
+ *   1. it has a working directory;
+ *   2. its own repository root does not match the filter;
+ *   3. another repository on the same machine, known by a remote, has a root that matches
+ *      the filter, and the working directory is that root or beneath it (segment-aware).
+ * A repository with no known remote (keyed by its path) contains another only when there is
+ * git evidence at its root on that machine (the pushed map names it, or a session that ran
+ * there saw git; see repoEvidence in resolve.ts). A plain parent folder that merely has
+ * sessions is not a containing repository, so a symlinked repository under it still anchors.
+ * A root matches the filter when it, or its encoded form (-home-me-dev-app, every character
+ * outside [A-Za-z0-9] as '-'), contains the filter text, case-insensitively. So a worktree
+ * of one repository inside another's tree does not drag in the first repository, while a
+ * symlinked path, or a folder holding several repositories, still reaches every repository
+ * it names.
+ */
+function anchoredRepos(db: DB, filter: string, direct: Placed[]): string[] {
+  const f = trimRoot(filter.trim()).toLowerCase();
+  const matches = (root: string): boolean =>
+    root.toLowerCase().includes(f) ||
+    claudeProjectDir(root).toLowerCase().includes(f);
+  const triples = db
+    .prepare("SELECT DISTINCT host, repo, repo_root FROM sessions WHERE repo IS NOT NULL AND repo_root IS NOT NULL")
+    .all() as Array<{ host: string; repo: string; repo_root: string }>;
+  const evidence = dbRepoEvidence(db);
+  const matching = triples.filter(
+    (t) => matches(t.repo_root) && (!isPathKey(t.host, t.repo, t.repo_root) || evidence(t.host, t.repo_root)),
+  );
+  const anchored = new Set<string>();
+  for (const s of direct) {
+    if (s.repo === null) continue;
+    const cwd = s.cwd === null ? null : trimRoot(s.cwd);
+    const nested =
+      cwd !== null &&
+      !(s.repo_root !== null && matches(s.repo_root)) &&
+      matching.some((a) => {
+        if (a.host !== s.host || a.repo === s.repo) return false;
+        const root = trimRoot(a.repo_root);
+        return cwd === root || cwd.startsWith(root + "/");
+      });
+    if (!nested) anchored.add(s.repo);
+  }
+  return [...anchored];
+}
+
+/**
+ * Every repository of a project filter as the search engine applies it (a substring of the
+ * project dir or working directory), plus the repositories the text names: the sessions of
+ * these repositories match the filter too, so it reaches their worktrees and other paths.
+ * A session nested in a different repository's tree does not anchor its own repository
+ * (see anchoredRepos).
+ */
+export function reposForProjectFilter(db: DB, rawFilter: string): string[] {
+  const filter = projectFilterText(rawFilter);
+  const like = `%${likeEscape(filter)}%`;
+  const direct = db
+    .prepare("SELECT DISTINCT host, repo, repo_root, cwd FROM sessions WHERE repo IS NOT NULL AND (project LIKE ? ESCAPE '\\' OR cwd LIKE ? ESCAPE '\\')")
+    .all(like, like) as Placed[];
+  return [...new Set([...anchoredRepos(db, filter, direct), ...matchRepos(db, filter)])];
+}
+
+/** Every project with a session in one of these repositories. */
+function projectsOfRepos(db: DB, repos: string[]): string[] {
+  if (repos.length === 0) return [];
+  return db
+    .prepare("SELECT DISTINCT project FROM sessions WHERE repo IN (SELECT value FROM json_each(?))")
+    .pluck()
+    .all(JSON.stringify(repos)) as string[];
+}
+
+/** Projects matching what a caller typed by directory: a path, an encoded dir, or part of a name. */
+function directProjects(db: DB, q: string): string[] {
+  const encoded = q.includes("/") ? encodeProjectPath(q) : q;
   const exact = db
     .prepare("SELECT DISTINCT project FROM sessions WHERE project >= ? AND project < ?")
     .all(encoded, encoded + "￿") as Array<{ project: string }>;
@@ -22,6 +130,28 @@ export function matchProjects(db: DB, query: string): string[] {
     .prepare("SELECT DISTINCT project FROM sessions WHERE project LIKE ? ESCAPE '\\' OR cwd LIKE ? ESCAPE '\\'")
     .all(like, like) as Array<{ project: string }>;
   return rows.map((r) => r.project);
+}
+
+/**
+ * Encoded project dirs matching what a caller typed: a path (exact dir, or dirs beneath
+ * it), an encoded dir, part of a name ("ghostty" matches -Users-me-dev-ghostty), or a
+ * repository (its key, or part of its name). Then every project that shares a repository
+ * with a match, so a repository name or any one of its directories reaches all of its
+ * directories and worktrees, on every machine. Except that a match nested in a different
+ * repository's tree does not anchor its own repository (see anchoredRepos).
+ */
+export function matchProjects(db: DB, query: string): string[] {
+  const q = projectFilterText(query.trim());
+  if (!q) return [];
+  const direct = directProjects(db, q);
+  const repos = new Set(matchRepos(db, q));
+  if (direct.length) {
+    const placed = db
+      .prepare("SELECT DISTINCT host, repo, repo_root, cwd FROM sessions WHERE repo IS NOT NULL AND project IN (SELECT value FROM json_each(?))")
+      .all(JSON.stringify(direct)) as Placed[];
+    for (const r of anchoredRepos(db, q, placed)) repos.add(r);
+  }
+  return [...new Set([...direct, ...projectsOfRepos(db, [...repos])])];
 }
 
 /** SQL placeholder list and values for an IN (...) over projects. */

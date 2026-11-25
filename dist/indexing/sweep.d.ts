@@ -4,10 +4,13 @@
  */
 import { type DB } from "../db/database.js";
 import { type TranscriptFile } from "../parsers/transcript-files.js";
+import { type DuplicateLines } from "./indexer.js";
+import { type LineHolder } from "./line-keys.js";
 /** Transcripts whose size, mtime or inode differ from what was last indexed. */
 export declare function changedTranscripts(db: DB): {
     all: number;
     changed: TranscriptFile[];
+    files: TranscriptFile[];
 };
 export interface LockHolder {
     pid: number;
@@ -35,11 +38,22 @@ export interface SweepStats {
     sessions: number;
     messages: number;
     databaseBytes: number;
+    /** Claude lines skipped because their uuid was already indexed, by class. */
+    duplicates: DuplicateLines;
+    /** Set when the repository step failed; the rest of the sweep is unaffected. */
+    repoError?: string;
     ms: number;
 }
 export interface SweepOptions {
     /** Called with a short progress line now and then (for a terminal). */
     progress?: (line: string) => void;
+    /**
+     * Which session holds a Claude line now, to break exact ties in the indexing order (rebuild
+     * passes the database it replaces, so a tie keeps its owner). See line-keys.ts.
+     */
+    lineHolder?: LineHolder;
+    /** Ask git about the working directories of the sessions indexed (default true; false for tests with no real repository). */
+    probeRepos?: boolean;
 }
 /** Count new messages towards the next VACUUM. */
 export declare function noteNewMessages(db: DB, added: number): void;

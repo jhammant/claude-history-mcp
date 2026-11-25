@@ -6,9 +6,11 @@ import { statSync } from "fs";
 import { getHeapStatistics } from "v8";
 import { CONFIG } from "../config.js";
 import { DatabaseMissingError, DatabaseOutdatedError, getMeta, openDatabase } from "../db/database.js";
+import { SOURCES, SOURCE_LABELS } from "../formats/types.js";
 import { importLegacy } from "../indexing/legacy-import.js";
 import { rebuild } from "../indexing/rebuild.js";
 import { changedTranscripts, sweep, SweepBusyError, topUp } from "../indexing/sweep.js";
+import { recordRepos } from "../repos/probe.js";
 import { formatDateTime } from "../search/format.js";
 import { SearchEngine } from "../search/search-engine.js";
 import { handleSearchHistory } from "../tools/search-history.js";
@@ -44,15 +46,27 @@ function bytes(size) {
 function progressWriter() {
     return process.stderr.isTTY ? (line) => process.stderr.write(line + "\n") : undefined;
 }
+/** Claude lines skipped as already indexed, when there were any. */
+function duplicateLine(stats) {
+    const d = stats.duplicates;
+    const total = d.sameSession + d.otherSession + d.beforeUpgrade;
+    if (!total)
+        return "";
+    const parts = [d.sameSession && `${n(d.sameSession)} from a copy of the same session`, d.otherSession && `${n(d.otherSession)} held by another session`,
+        d.beforeUpgrade && `${n(d.beforeUpgrade)} indexed before the upgrade`].filter(Boolean);
+    return `; ${n(total)} copied lines skipped (${parts.join(", ")})`;
+}
 function sweepLine(stats) {
     const changed = stats.changed === 0
         ? "Nothing changed"
         : `Indexed ${n(stats.indexed)} of ${n(stats.changed)} changed transcripts (+${n(stats.messagesAdded)} messages` +
-            `${stats.reset ? `, ${stats.reset} re-read from scratch` : ""}${stats.raced ? `, ${stats.raced} left to another indexer` : ""})`;
+            `${stats.reset ? `, ${stats.reset} re-read from scratch` : ""}${stats.raced ? `, ${stats.raced} left to another indexer` : ""}` +
+            `${duplicateLine(stats)})`;
     return `${changed} in ${(stats.ms / 1000).toFixed(1)} s; ${n(stats.transcripts)} transcripts on disk, ` +
         `${n(stats.sessions)} sessions and ${n(stats.messages)} messages in the database (${bytes(stats.databaseBytes)})` +
         `${stats.summarized ? `; ${n(stats.summarized)} summaries refreshed` : ""}${stats.optimized ? "; search index optimised" : ""}` +
-        `${stats.vacuumed ? "; database compacted" : ""}.`;
+        `${stats.vacuumed ? "; database compacted" : ""}.` +
+        `${stats.repoError ? ` Repository attribution failed (will retry): ${stats.repoError}` : ""}`;
 }
 function runSweep(args) {
     const db = openDatabase(CONFIG.databaseFile, { create: true });
@@ -77,7 +91,8 @@ async function runRebuild(args) {
         const stats = await rebuild(CONFIG.databaseFile, progressWriter());
         console.log(args.flags.has("json")
             ? JSON.stringify(stats)
-            : `Rebuilt: ${sweepLine(stats.sweep)} Kept ${n(stats.carriedSessions)} archived sessions (${n(stats.carriedMessages)} messages) whose transcripts are gone.`);
+            : `Rebuilt: ${sweepLine(stats.sweep)} Kept ${n(stats.carriedSessions)} archived sessions (${n(stats.carriedMessages)} messages) whose transcripts are gone` +
+                `${stats.carriedSharedLines ? ` (${n(stats.carriedSharedLines)} of their lines also held by a re-read session)` : ""}.`);
         return 0;
     }
     catch (error) {
@@ -109,6 +124,12 @@ function runStatus(args) {
             .prepare(`SELECT count(*) AS sessions, sum(source = 'codex') AS codex, sum(is_subagent) AS subagents, sum(legacy) AS legacy
          FROM sessions`)
             .get();
+        // Per source, leaving out Codex and pi sessions with no messages (Codex guardian-review threads); every Claude
+        // session counts. Unlike list_projects, these counts include subagent runs. The headline total is the sum of
+        // them, so the two always add up.
+        const counted = "source = 'claude' OR message_count > 0";
+        const sourceRows = db.prepare(`SELECT source, count(*) AS n FROM sessions WHERE ${counted} GROUP BY source`).all();
+        const sessionsBySource = SOURCES.map((source) => ({ source, sessions: sourceRows.find((r) => r.source === source)?.n ?? 0 }));
         const messages = db.prepare("SELECT count(*) AS messages, min(ts) AS oldest, max(ts) AS newest FROM messages").get();
         const { all, changed } = changedTranscripts(db);
         let size = 0;
@@ -125,7 +146,9 @@ function runStatus(args) {
         const status = {
             database: CONFIG.databaseFile,
             bytes: size,
-            sessions: counts.sessions,
+            sessions: sessionsBySource.reduce((total, c) => total + c.sessions, 0),
+            sessionsBySource,
+            // As before: every Codex session, empty ones included (kept for scripts reading the old field).
             codexSessions: counts.codex ?? 0,
             subagentSessions: counts.subagents ?? 0,
             archivedSessions: counts.legacy ?? 0,
@@ -142,9 +165,15 @@ function runStatus(args) {
             console.log(JSON.stringify(status));
             return 0;
         }
+        // The same sessions as the Sessions line (empty Codex and pi threads left out), so the two add up.
+        const hostRows = db.prepare(`SELECT host, count(*) AS n FROM sessions WHERE ${counted} GROUP BY host ORDER BY n DESC, host`).all();
+        const hostsLine = hostRows.some((r) => r.host !== "")
+            ? [`Hosts: ${hostRows.map((r) => `${r.host || "unknown"} (${n(r.n)} sessions)`).join(", ")}`]
+            : [];
         console.log([
             `Database: ${status.database} (${bytes(status.bytes)})`,
-            `Sessions: ${n(status.sessions)} (${n(status.codexSessions)} Codex, ${n(status.subagentSessions)} subagent runs, ${n(status.archivedSessions)} archived from the old index)`,
+            `Sessions: ${n(status.sessions)} (${SOURCES.map((s) => `${n(sessionsOf(status.sessionsBySource, s))} ${SOURCE_LABELS[s]}`).join(", ")}, ${n(status.subagentSessions)} subagent runs, ${n(status.archivedSessions)} archived from the old index)`,
+            ...hostsLine,
             `Messages: ${n(status.messages)}, oldest ${formatDateTime(status.oldestMessage)}, newest ${formatDateTime(status.newestMessage)}`,
             `Files behind: ${n(status.filesBehind)} of ${n(status.transcripts)} transcripts changed since they were indexed`,
             `Last sweep: ${lastSweep ? `${formatDateTime(lastSweep)}${status.lastSweepMs !== null ? ` (took ${(status.lastSweepMs / 1000).toFixed(1)} s)` : ""}` : "never"}`,
@@ -154,6 +183,9 @@ function runStatus(args) {
     finally {
         db.close();
     }
+}
+function sessionsOf(counts, source) {
+    return counts.find((c) => c.source === source)?.sessions ?? 0;
 }
 /** The old index unpacks to several GB: make sure this process may use that much. */
 const IMPORT_HEAP_MB = 24_576;
@@ -217,17 +249,19 @@ function runSearch(args) {
         db.close();
     }
 }
-const HELP = `claude-history-mcp: search past Claude Code and Codex conversations.
+const HELP = `claude-history-mcp: search past Claude Code, Codex and pi conversations.
 
   node dist/index.js                    run the MCP server (stdio)
   node dist/index.js sweep [--json]     index what changed, refresh summaries (alias: index)
   node dist/index.js rebuild [--json]   build a fresh database and swap it in, keeping archived sessions
   node dist/index.js status [--json]    database size, counts, files behind, last sweep
   node dist/index.js import-legacy      one-time import of the old index.msgpack, summaries/ and knowledge.json
+  node dist/index.js record-repo [dir]  note which git repository a directory belongs to (prints nothing)
   node dist/index.js search "<query>" [--limit N] [--project P] [--context] [--sort recent] [--timing] [--no-topup]
 
 Environment: CLAUDE_HISTORY_DATA_DIR, CLAUDE_HISTORY_CLAUDE_DIR, CLAUDE_HISTORY_PROJECTS_DIR,
-CODEX_TRANSCRIPT_FEED, CODEX_HOME, CLAUDE_HISTORY_TOPUP_MS.`;
+CODEX_TRANSCRIPT_FEED, CLAUDE_HISTORY_CODEX_SESSIONS_DIR, CLAUDE_HISTORY_PI_SESSIONS_DIR, CODEX_HOME,
+CLAUDE_HISTORY_TOPUP_MS.`;
 export async function runCommand(command, argv) {
     const args = parseArgs(argv);
     try {
@@ -243,6 +277,15 @@ export async function runCommand(command, argv) {
                 return await runImportLegacy(args);
             case "search":
                 return runSearch(args);
+            case "record-repo":
+                // Runs at every session start: silent, never fails, and never opens the database.
+                try {
+                    recordRepos([args.positional[0] ?? process.cwd()]);
+                }
+                catch {
+                    // process.cwd() throws when the directory was deleted: nothing to record
+                }
+                return 0;
             default:
                 console.log(HELP);
                 return 0;

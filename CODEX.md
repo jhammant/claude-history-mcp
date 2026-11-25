@@ -1,8 +1,12 @@
 # Codex history
 
 Install and synchronize the `codex-sessions` companion from the claude-sessions
-repository. This server indexes its private normalized transcript feed alongside
-Claude history. Existing tool names and accepted Claude data remain unchanged.
+repository. This server indexes native Codex rollout files and the older private
+normalized transcript feed alongside Claude history. Existing tool names and accepted
+Claude data remain unchanged.
+
+Native Codex rollout files (`~/.codex/sessions`, or `CLAUDE_HISTORY_CODEX_SESSIONS_DIR`) are
+read directly; the feed described below is kept for compatibility.
 
 The default feed is `~/.codex/transcript-feed/projects`, configurable through
 `CODEX_HOME` or `CODEX_TRANSCRIPT_FEED`. Codex IDs are prefixed `codex-` so they

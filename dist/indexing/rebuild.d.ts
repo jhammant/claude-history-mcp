@@ -13,6 +13,11 @@ export interface RebuildStats {
     /** Sessions copied from the old database because no transcript has them any more. */
     carriedSessions: number;
     carriedMessages: number;
+    /**
+     * Lines of carried sessions (by uuid) that a re-read session holds too: a fork whose original
+     * transcript is gone. The carried rows keep them, so these lines are stored twice.
+     */
+    carriedSharedLines: number;
 }
 export declare function rebuild(livePath: string, progress?: (line: string) => void): Promise<RebuildStats>;
 //# sourceMappingURL=rebuild.d.ts.map

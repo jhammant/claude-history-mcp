@@ -8,9 +8,13 @@ import { getMeta, isBusyError, setMeta, withBusyTimeout } from "../db/database.j
 import { extractKnowledge } from "../knowledge/knowledge-extractor.js";
 import { replaceSessionKnowledge } from "../knowledge/knowledge-store.js";
 import { loadParsedSession } from "../knowledge/parsed-session.js";
+import { loadRepoMaps } from "../repos/map.js";
+import { recordRepos } from "../repos/probe.js";
+import { REPO_NEW_DIR_KEY, repoResolvedStamp, resolveAllSessions } from "../repos/resolve.js";
 import { saveSummary, summarizeSession } from "../knowledge/session-summarizer.js";
 import { listSubagentFiles, listTranscripts } from "../parsers/transcript-files.js";
-import { hasChanged, indexFile } from "./indexer.js";
+import { hasChanged, indexFile, noDuplicates } from "./indexer.js";
+import { indexingOrder } from "./line-keys.js";
 /** Run FTS5 'optimize' once this many messages have been added since the last one. */
 const OPTIMIZE_AFTER_MESSAGES = 50_000;
 /** VACUUM when more than this share of the file is free pages (after a migration, say)... */
@@ -34,7 +38,7 @@ export function changedTranscripts(db) {
     const files = listTranscripts();
     const changed = files.filter((f) => hasChanged(f, known.get(f.path)));
     changed.sort((a, b) => b.mtimeMs - a.mtimeMs);
-    return { all: files.length, changed };
+    return { all: files.length, changed, files };
 }
 // ---------------------------------------------------------------- locking
 function isAlive(pid) {
@@ -99,6 +103,41 @@ function refreshKnowledge(db, sids) {
     }
     return count;
 }
+/** Distinct working directories of this host's sessions: the given ones, or all of them. */
+function hostDirs(db, sids) {
+    if (sids === null) {
+        return db.prepare("SELECT DISTINCT cwd FROM sessions WHERE host = ? AND cwd IS NOT NULL AND cwd <> ''").pluck().all(CONFIG.host);
+    }
+    const dirs = new Set();
+    const one = db.prepare("SELECT cwd FROM sessions WHERE sid = ? AND host = ? AND cwd IS NOT NULL AND cwd <> ''").pluck();
+    for (const sid of sids) {
+        const cwd = one.get(sid, CONFIG.host);
+        if (cwd)
+            dirs.add(cwd);
+    }
+    return [...dirs];
+}
+/**
+ * Repository attribution: probe git for the directories (the map file is the single record, so a
+ * rebuild keeps worktrees deleted since), load this host's own map file, and run the full pass
+ * when the map, the resolver stamp or the new-directory flag says it is due. New sessions are
+ * resolved as their files are indexed; an idle sweep costs a read of the map file and two meta
+ * reads.
+ */
+function resolveRepositories(db, indexed, probe) {
+    const stampChanged = getMeta(db, "repo_resolved") !== repoResolvedStamp();
+    if (probe)
+        recordRepos(hostDirs(db, stampChanged ? null : indexed), { mapDir: CONFIG.repoMapDir, host: CONFIG.host });
+    // Only this host's own file: another host's file in a shared map directory never applies here.
+    const maps = loadRepoMaps(db, CONFIG.repoMapDir, CONFIG.host, { file: `${CONFIG.host}.jsonl` });
+    if (maps.changed || stampChanged || getMeta(db, REPO_NEW_DIR_KEY) !== undefined) {
+        db.transaction(() => {
+            resolveAllSessions(db);
+            setMeta(db, "repo_resolved", repoResolvedStamp());
+            db.prepare("DELETE FROM meta WHERE key = ?").run(REPO_NEW_DIR_KEY);
+        }).immediate();
+    }
+}
 /** Count new messages towards the next VACUUM. */
 export function noteNewMessages(db, added) {
     setMeta(db, "messages_since_vacuum", String(Number(getMeta(db, "messages_since_vacuum") ?? 0) + added));
@@ -135,15 +174,29 @@ export function sweep(db, options = {}) {
     if (holder)
         throw new SweepBusyError(holder);
     try {
-        const { all, changed } = changedTranscripts(db);
+        const { all, changed, files } = changedTranscripts(db);
         const stats = {
             transcripts: all, changed: changed.length, indexed: 0, reset: 0, raced: 0, vanished: 0, messagesAdded: 0,
             bytesRead: 0, summarized: 0, optimized: false, vacuumed: false, sessions: 0, messages: 0, databaseBytes: 0, ms: 0,
+            duplicates: noDuplicates(),
         };
         const touched = new Set();
+        const indexedSids = new Set();
         let lastReport = Date.now();
-        changed.forEach((file, i) => {
+        // Claude files in a fixed order (line-keys.ts, indexingOrder): the session that existed first
+        // keeps the lines a later fork copied, in every sweep and in a rebuild alike, unless the fork
+        // was indexed in an earlier run (a top-up, or an original pushed later).
+        const queue = indexingOrder(changed, options.lineHolder);
+        /** Paths still to read in this sweep. */
+        const pending = new Set(queue.map((f) => f.path));
+        const byPath = new Map(files.map((f) => [f.path, f]));
+        const otherFiles = db.prepare("SELECT path FROM files WHERE session_sid = ? AND path <> ? ORDER BY path").pluck();
+        for (let i = 0; i < queue.length; i++) {
+            const file = queue[i];
+            pending.delete(file.path);
             const result = indexFile(db, file);
+            for (const k of Object.keys(stats.duplicates))
+                stats.duplicates[k] += result.duplicates[k];
             if (result.status === "indexed")
                 stats.indexed++;
             if (result.status === "raced")
@@ -154,14 +207,34 @@ export function sweep(db, options = {}) {
                 stats.reset++;
             stats.messagesAdded += result.messagesAdded;
             stats.bytesRead += result.bytesRead;
+            if (result.sessionSid !== undefined)
+                indexedSids.add(result.sessionSid);
             if (result.sessionSid !== undefined && (result.messagesAdded > 0 || result.reset))
                 touched.add(result.sessionSid);
+            // A session read again from scratch: its other files (a twin under another project path)
+            // were set back to their start, so they are read in this sweep too, not the next.
+            if (result.reset && result.sessionSid !== undefined) {
+                for (const path of otherFiles.all(result.sessionSid, file.path)) {
+                    const other = byPath.get(path);
+                    if (other && !pending.has(path)) {
+                        pending.add(path);
+                        queue.push(other);
+                    }
+                }
+            }
             if (options.progress && Date.now() - lastReport > 5_000) {
                 lastReport = Date.now();
-                options.progress(`  ${i + 1}/${changed.length} transcripts, ${stats.messagesAdded.toLocaleString("en-US")} messages added`);
+                options.progress(`  ${i + 1}/${queue.length} transcripts, ${stats.messagesAdded.toLocaleString("en-US")} messages added`);
             }
-        });
+        }
         stats.summarized = refreshKnowledge(db, touched);
+        // A repository failure never fails the sweep; the stamp or flag stays, so the next sweep retries.
+        try {
+            resolveRepositories(db, indexedSids, options.probeRepos !== false);
+        }
+        catch (error) {
+            stats.repoError = error instanceof Error ? error.message : String(error);
+        }
         const sinceOptimize = Number(getMeta(db, "messages_since_optimize") ?? 0) + stats.messagesAdded;
         if (sinceOptimize >= OPTIMIZE_AFTER_MESSAGES) {
             db.prepare("INSERT INTO messages_fts(messages_fts) VALUES ('optimize')").run();

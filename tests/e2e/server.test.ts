@@ -96,7 +96,7 @@ describe('built server over stdio', () => {
 
   it('list_projects, get_session_summary, get_project_context and find_patterns answer from the database', async () => {
     const projects = await call(client, 'list_projects');
-    expect(projects).toContain('- /work/shop — 1 sessions, 5 messages (1 subagent runs)');
+    expect(projects).toContain('- shop — 1 sessions, 5 messages (1 subagent runs)');
     expect(projects).toContain('codex-api');
 
     const summary = await call(client, 'get_session_summary', { project: 'shop' });

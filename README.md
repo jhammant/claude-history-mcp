@@ -55,20 +55,27 @@ for a JSON array. It reads two small indexed tables and takes a few tens of mill
 ## How It Works
 
 ```text
-~/.claude/projects/**.jsonl   ──┐   sweep (nightly)        ┌───────────────────────────┐
-  sessions + subagent runs      ├──────────────────────────▶ ~/.claude-history-mcp/     │
-~/.codex/transcript-feed/     ──┘   top-up (at query time,  │   history.db  (SQLite)    │
-  projects/**.jsonl                 ≤300 ms, newest first)  │   messages + FTS5 index   │
-                                                            │   sessions, summaries,    │
-                                                            │   knowledge               │
-                                                            └─────────────▲─────────────┘
-                                                                          │ read
-                                              one MCP server per Claude Code / Codex session
+~/.claude/projects/**.jsonl           ──┐  sweep (nightly)         ┌───────────────────────────┐
+  sessions + subagent runs              │                          │ ~/.claude-history-mcp/    │
+~/.codex/transcript-feed/projects/    ──┤  top-up (at query time,─▶│   history.db  (SQLite)    │
+~/.codex/sessions/**/rollout-*.jsonl  ──┤  ≤300 ms, newest first)  │   messages + FTS5 index   │
+~/.pi/agent/sessions/**.jsonl         ──┘                          │   sessions, summaries,    │
+                                                                   │   knowledge               │
+                                                                   └─────────────▲─────────────┘
+                                                                                │ read
+                                                      one MCP server per Claude Code / Codex / pi session
 ```
 
 **Transcripts.** Claude Code saves every conversation as JSONL under `~/.claude/projects/`
-(subagent runs under `<session>/subagents/`); the optional Codex feed lives under
-`~/.codex/transcript-feed/projects/`.
+(subagent runs under `<session>/subagents/`). Native Codex rollout files are read
+directly from `~/.codex/sessions/` and pi session files from `~/.pi/agent/sessions/`;
+the older Codex feed (`~/.codex/transcript-feed/projects/`) is still read if present.
+Codex and pi sessions get their project from the working directory they recorded, and
+sit in the same database as `source = codex` and `source = pi`. If a Codex session exists as
+both a feed file and a rollout (the same `codex-<id>`), the file indexed first feeds it and the
+other is skipped, so its messages are stored once.
+A forked Codex session (a subagent, or a resumed copy) starts by replaying its parent's
+history; the replay is skipped, so only the fork's own messages are indexed under it.
 
 **One database.** `history.db` holds one row per message: the prose, the tool names, and
 the tool activity (commands, file paths, search patterns, and tool results capped at about
@@ -83,6 +90,16 @@ the last run, up to the last complete line. A file that shrank or was replaced i
 again from the start. Two indexers working on one file at once cannot insert anything
 twice: each batch re-checks the stored offset inside its write transaction.
 
+**Each Claude line once.** Claude Code copies a session's history into the file of a session
+it forks, and one session file can sit under two spellings of a project path. Each user and
+assistant line has a `uuid`; the database remembers the ones it has indexed and skips a line
+it already holds. A forked session therefore keeps only its own lines: the shared history is
+found under the session that had it first (the sweep reads the oldest files first, so a sweep
+and a rebuild agree). Its first prompt and times are its own, and its working directory and
+branch come from the copied lines only when its own lines do not say. The sweep output counts
+the lines it skipped. Upgrading from version 2 in place keeps what is indexed, and does not
+remove duplicates already in the database; run `rebuild` once to do that (sessions whose transcripts are gone are kept as they are).
+
 **Nothing runs in the background.** There is no daemon, watcher or timer. Freshness comes
 from the scheduled sweep, plus a short top-up a server may do before a search (transcripts
 changed since the last sweep, newest first, within about 300 ms, at most every 20 seconds).
@@ -95,6 +112,73 @@ no index in memory, so each copy uses tens of MB rather than GBs.
 The database never drops a session because its file has gone, so it becomes the long-term
 archive; `read_session` opens those sessions too.
 
+### Hosts and repositories
+
+Every session records the host it came from and the repository it belongs to, so one
+database can hold several machines and `list_projects` can show one project once.
+
+- **Host.** A label on each session, set once by the first machine to deliver it. It is
+  `CLAUDE_HISTORY_HOST`, else the machine's hostname up to its first dot. Because it also
+  names this machine's map file, it is cleaned: characters outside `[A-Za-z0-9._-]` become
+  `_`, a leading `.` or `-` becomes `_`, and it is cut to 64 characters. Search it with
+  `host:laptop`; `host:unknown` finds sessions indexed before hosts were recorded.
+- **Repository.** The sweep works it out from the first of these that applies:
+  1. the git remote the session itself recorded, when the session saw git (a branch or a
+     remote) in its own working directory. A branch named `HEAD` is not evidence: Claude
+     Code writes it in folders that are no repository, and a detached checkout reports it. Only Codex sessions record a remote (the
+     one in the session header); Claude Code and pi sessions record none;
+  2. the repository map, a file per machine with one line per directory: the directory,
+     its main repository root and its `origin` URL. The row for the session's directory
+     applies, or else the row for the nearest parent directory that has one; it gives both
+     the key and the root, and a row with no usable remote gives a key by host and path;
+  3. the remote of another session on the same host that ran in exactly the same directory
+     and saw git there, with no map row for the directory or a parent. It gives the key only:
+     the root is the one steps 5 and 6 give;
+  4. the session's own remote when it was recorded for another directory (a Codex session
+     whose first activity was outside the directory its header names), with neither a map
+     row for the directory or a parent nor such a remote for the directory; again the key only;
+  5. worktree folding: `<repo>/.claude/worktrees/<name>` belongs to `<repo>`, and so does
+     `<repo>/.worktrees/<name>` (also `worktrees`; see `CLAUDE_HISTORY_WORKTREE_DIRS`) when
+     `<repo>` is known to be a git work tree;
+  6. the working directory itself.
+
+  A repository with a remote is keyed `host/owner/name` (for example `example.com/acme/app`)
+  and is one repository on every machine. One without a remote is keyed by host and path, so
+  the same path on `laptop` and `desktop` is not taken to be one repository unless a git
+  remote says so.
+  Two repositories that share a name are listed by checkout path where that tells them
+  apart, else as `owner/name`, the full remote, or `name @host`; a project filter accepts
+  `owner/name` and `name @host` too (the latter names the repositories called `name` that
+  have no remote, on that host). Trailing slashes on a filter are ignored.
+  A project filter reaches every directory of the repositories it matches. The exception is
+  a session on the same machine inside another repository's tree, when that repository is
+  known to be a git repository (it has a remote, or a path key with git evidence at its
+  root: the pushed map names the root, or a session that ran there saw git) and the
+  session's own repository root does not match the filter: it does not bring in the rest of
+  its own repository. A plain folder that only holds sessions is not such a repository.
+- **What runs.** `sweep` asks git about the working directories of the sessions it indexed
+  and appends the answers to `<host>.jsonl` in the map directory (`CLAUDE_HISTORY_REPO_MAP_DIR`,
+  default `<data dir>/repo-map`). When the resolution settings change
+  (`CLAUDE_HISTORY_REPO_HOST_ALIASES` or `CLAUDE_HISTORY_WORKTREE_DIRS`), and on the first
+  sweep after the upgrade, it asks about every directory of this host's sessions instead.
+  The git commands are `rev-parse --show-toplevel`, `rev-parse --show-prefix`,
+  `rev-parse --path-format=absolute --git-common-dir`, `rev-parse --is-bare-repository`,
+  `config --get core.worktree` and `remote get-url origin`: all local and read-only, each
+  with a 5 second timeout and with prompts and optional locks turned off. It makes no
+  network call; with git missing or outside a repository it records nothing. The query-time
+  top-up never runs git. The map file holds directory paths and remote URLs with any
+  credentials removed. `record-repo` (see Commands) writes the same file.
+- **Map files.** Each sweep reads only this host's own file, `<host>.jsonl` in the map
+  directory. Other files there (another machine's, in a shared or synced folder) are
+  ignored, so one machine's entries never apply to another. Malformed lines, relative paths
+  and `..` paths are ignored, and a newer entry (by its `at` time) replaces an older one for
+  the same directory; on equal times the later line wins.
+
+Upgrading: the database migrates in place to schema version 4 on the next `sweep`. A session
+indexed earlier shows host `unknown` until it is next indexed, and until then it is keyed by
+its path alone, with no host or remote; `claude-history-mcp rebuild` re-indexes every session
+whose transcript still exists. Sessions whose transcript is gone keep host `unknown`.
+
 ## Commands
 
 ```bash
@@ -104,6 +188,7 @@ node dist/index.js status [--json]       # size, sessions, messages, oldest/newe
 node dist/index.js search "<query>" [--limit N] [--project P] [--context] [--sort recent] [--timing] [--no-topup]
 node dist/index.js rebuild [--json]      # build a fresh database beside the old one and swap it in
 node dist/index.js import-legacy         # one-time import from the version 1 index (see below)
+node dist/index.js record-repo [dir]     # note which repository a directory belongs to (default: the current directory); prints nothing
 npm run build-index                      # same as sweep, from the TypeScript sources
 ```
 
@@ -115,6 +200,16 @@ file (`VACUUM`, about 10 s for a large history) after a migration, or once a ten
 messages are new since the last compaction: keeping each table in one place roughly halves
 the time of a search on a cold disk cache. `rebuild` keeps every session whose transcript no longer exists, and swaps the
 new database in with SQLite's online backup, so open servers simply see the new data.
+
+`record-repo` asks local git about one directory and appends the answer to this machine's
+map file. It prints nothing and always exits 0, so it is safe in a `SessionStart` hook:
+
+```json
+{"type": "command", "command": "claude-history-mcp record-repo"}
+```
+
+It helps when a worktree is deleted before the next sweep, which could no longer ask git
+about it.
 
 ### Upgrading from version 1 (index.msgpack)
 
@@ -139,8 +234,14 @@ The old files are left in place; delete them yourself once you are happy.
 | `CLAUDE_HISTORY_CLAUDE_DIR` | `~/.claude` | Claude Code's config dir (settings, commands) |
 | `CLAUDE_HISTORY_PROJECTS_DIR` | `<claude dir>/projects` | Claude Code transcripts |
 | `CODEX_TRANSCRIPT_FEED` | `<CODEX_HOME>/transcript-feed` | Codex feed root (reads its `projects/`) |
+| `CLAUDE_HISTORY_CODEX_SESSIONS_DIR` | `<CODEX_HOME or ~/.codex>/sessions` | Native Codex rollout files |
+| `CLAUDE_HISTORY_PI_SESSIONS_DIR` | `~/.pi/agent/sessions` | Native pi session files |
 | `CODEX_HOME` | `~/.codex` | Codex home |
 | `CLAUDE_HISTORY_TOPUP_MS` | `300` | Query-time indexing budget in ms; `0` turns it off |
+| `CLAUDE_HISTORY_HOST` | hostname up to its first dot | Name of this machine, recorded on each session it indexes first and naming its map file; cleaned as described under Hosts and repositories |
+| `CLAUDE_HISTORY_REPO_MAP_DIR` | `<data dir>/repo-map` | Directory of per-machine repository maps (`<host>.jsonl`); a sweep reads only its own host's file |
+| `CLAUDE_HISTORY_REPO_HOST_ALIASES` | none | Git host aliases, `a=b,c=d`: remotes on host `a` count as host `b` (for example `git.internal=example.com`) |
+| `CLAUDE_HISTORY_WORKTREE_DIRS` | `.worktrees,worktrees` | Comma-separated folder names that hold a repository's worktrees; set but empty means none |
 
 ## What Claude Can Do With It
 
@@ -160,8 +261,8 @@ The old files are left in place; delete them yourself once you are happy.
   (marked "partial match"), ranked by how much of the query they contain.
 - `"exact phrase"`, `redis OR memcached`.
 - Identifiers work as typed: `index.msgpack`, `ERR_SQLITE_ERROR`, `src/server.ts`.
-- Filters: `project:` `branch:` `tool:Bash` `role:user|assistant|tool` `source:claude|codex`
-  `session:<id>` `after:7d` `before:2026-01-15` (relative `h/d/w/m/y`, ISO dates, `today`).
+- Filters: `project:` `branch:` `tool:Bash` `role:user|assistant|tool` `source:claude|codex|pi`
+  `host:laptop` (`host:unknown` for sessions indexed before hosts were recorded) `session:<id>` `after:7d` `before:2026-01-15` (relative `h/d/w/m/y`, ISO dates, `today`).
   `session:` takes a session id or prefix: a parent session's id also covers its subagents,
   and `session:agent-<id>` finds that subagent under every parent.
 - Each hit is labelled with its working directory (home shown as `~`), the date, the

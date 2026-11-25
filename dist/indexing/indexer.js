@@ -15,19 +15,34 @@
  * Calls to this server's own tools keep their name, but neither their input nor their
  * result is indexed. Their results can arrive in a later append than the call, so the
  * calls still waiting for a result are kept with the file.
+ *
+ * A Claude line is indexed at most once across the database, keyed by its uuid (line-keys.ts):
+ * Claude Code copies a session's history into a forked session's file, and the same session
+ * file can be found under two spellings of one project path. The copies are skipped, so a
+ * search finds the text once, in the session that had it first.
  */
 import { closeSync, existsSync, openSync, readFileSync, readSync } from "fs";
 import { createHash } from "crypto";
 import { CONFIG } from "../config.js";
 import { scopeOf } from "../db/schema.js";
 import { extractContent, isLocalCommandEcho, truncate } from "../parsers/content-extractor.js";
+import { formatOf } from "../formats/registry.js";
+import { claudeProjectDir, UNKNOWN_PROJECT } from "../utils/path-encoder.js";
+import { implicitRepoKey, REPO_NEW_DIR_KEY, repoResolver } from "../repos/resolve.js";
+import { stripRemoteCredentials } from "../repos/url.js";
+import { lineKey } from "./line-keys.js";
 import { readLines } from "./line-reader.js";
 const HEAD_BYTES = 4096;
 const DEFAULT_BATCH_BYTES = 4 << 20;
-/** Lines this long are parsed only when they look like a message (skips API dumps). */
+/** Lines this long are parsed only when their format says they look like a message (skips API dumps). */
 const BIG_LINE = 256 << 10;
+export function noDuplicates() {
+    return { sameSession: 0, otherSession: 0, beforeUpgrade: 0 };
+}
+/** Thrown inside a write transaction to roll it back: another indexer took a line first. */
+const RACED = new Error("raced");
 const MAX_PENDING_TOOLS = 100;
-function parsePendingTools(raw) {
+export function parsePendingTools(raw) {
     try {
         const value = raw ? JSON.parse(raw) : {};
         return {
@@ -45,8 +60,23 @@ function serializePendingTools(pending) {
     return own.length || textCalls.length ? JSON.stringify({ own, textCalls }) : "";
 }
 function emptyUpdate() {
-    return { minTs: null, maxTs: null, added: 0, cwd: null, branch: null, firstPrompt: null, aiTitle: null, customTitle: null };
+    return {
+        gitRemote: null, minTs: null, maxTs: null, added: 0, cwd: null, branch: null, firstPrompt: null, aiTitle: null, customTitle: null,
+        cwdGit: 0, copiedCwd: null, copiedBranch: null, copiedGitRemote: null, copiedCwdGit: 0,
+    };
 }
+/**
+ * Whether a line shows that its cwd is inside a git work tree: a real branch name or a remote.
+ * A branch named `HEAD` is not evidence: Claude Code writes it in directories that are not
+ * repositories, and a detached checkout reports it too. (The stored git_branch is unchanged.)
+ */
+function carriesGitEvidence(obj) {
+    const branch = typeof obj.gitBranch === "string" ? obj.gitBranch : "";
+    return (branch !== "" && branch !== "HEAD") || (typeof obj.gitRemote === "string" && obj.gitRemote !== "");
+}
+/** sessions.context_copied bits: the stored value came from copied lines, not the session's own. */
+const COPIED_CWD = 1;
+const COPIED_BRANCH = 2;
 function appendCapped(existing, addition, cap) {
     if (!addition)
         return existing;
@@ -95,13 +125,19 @@ function subagentTitle(file) {
  * Builds message rows from transcript lines. Holds the last row open so that the next
  * line (another block of the same assistant turn, or a tool result) can extend it.
  */
-class RowBuilder {
+export class RowBuilder {
     pending;
     nextSeq;
     hasFirstPrompt;
     calls;
     finished = [];
     update = emptyUpdate();
+    /**
+     * The session's own cwd: the stored one when the session has it, else the first cwd read. Git
+     * evidence counts for it only from a line at that cwd, since a session that started in a
+     * folder and moved into a repository records the folder as its cwd and the repository's branch.
+     */
+    sessionCwd = null;
     constructor(pending, nextSeq, hasFirstPrompt, calls) {
         this.pending = pending;
         this.nextSeq = nextSeq;
@@ -134,6 +170,54 @@ class RowBuilder {
         u.minTs = u.minTs === null ? ts : Math.min(u.minTs, ts);
         u.maxTs = u.maxTs === null ? ts : Math.max(u.maxTs, ts);
     }
+    /**
+     * Where a line was written (cwd and git branch) as session metadata. Never its time or prompt.
+     */
+    noteContext(obj) {
+        // A cwd the format states for the whole session (a Codex fork's header) wins over the line's.
+        if (typeof obj.sessionCwd === "string" && obj.sessionCwd) {
+            if (!this.update.cwd)
+                this.update.cwd = obj.sessionCwd;
+            if (!this.sessionCwd)
+                this.sessionCwd = obj.sessionCwd;
+        }
+        if (typeof obj.cwd === "string" && obj.cwd && !this.update.cwd)
+            this.update.cwd = obj.cwd;
+        if (typeof obj.gitBranch === "string" && obj.gitBranch && !this.update.branch)
+            this.update.branch = obj.gitBranch;
+        if (typeof obj.gitRemote === "string" && obj.gitRemote && !this.update.gitRemote)
+            this.update.gitRemote = obj.gitRemote;
+        // A session-level remote on a line at another directory (the Codex header's, see
+        // codex-rollout.ts): the session's remote, but no evidence for this line's cwd.
+        if (typeof obj.sessionGitRemote === "string" && obj.sessionGitRemote && !this.update.gitRemote) {
+            this.update.gitRemote = obj.sessionGitRemote;
+        }
+        const lineCwd = typeof obj.cwd === "string" && obj.cwd ? obj.cwd : null;
+        if (lineCwd && !this.sessionCwd)
+            this.sessionCwd = lineCwd;
+        if (lineCwd && lineCwd === this.sessionCwd &&
+            carriesGitEvidence(obj)) {
+            this.update.cwdGit = 1;
+        }
+    }
+    /**
+     * Where a line skipped because another session holds it was written: a fallback for a fork
+     * whose own lines do not say (a session's own lines always win, see updateSession).
+     */
+    noteCopied(obj) {
+        const u = this.update;
+        const lineCwd = typeof obj.cwd === "string" && obj.cwd ? obj.cwd : null;
+        if (lineCwd && !u.copiedCwd)
+            u.copiedCwd = lineCwd;
+        if (typeof obj.gitBranch === "string" && obj.gitBranch && !u.copiedBranch)
+            u.copiedBranch = obj.gitBranch;
+        if (typeof obj.gitRemote === "string" && obj.gitRemote && !u.copiedGitRemote)
+            u.copiedGitRemote = obj.gitRemote;
+        if (lineCwd && lineCwd === u.copiedCwd &&
+            carriesGitEvidence(obj)) {
+            u.copiedCwdGit = 1;
+        }
+    }
     addLine(obj) {
         const type = obj.type;
         if (type === "ai-title" && typeof obj.aiTitle === "string") {
@@ -144,6 +228,14 @@ class RowBuilder {
             this.update.customTitle = truncate(obj.customTitle, 200);
             return;
         }
+        // The task a forked Codex subagent was given (see codex-rollout.ts): its first prompt, no row.
+        if (type === "first-prompt" && typeof obj.text === "string") {
+            if (!this.hasFirstPrompt && obj.text.trim()) {
+                this.update.firstPrompt = truncate(obj.text.replace(/\s+/g, " "), CONFIG.limits.firstPrompt);
+                this.hasFirstPrompt = true;
+            }
+            return;
+        }
         if (type !== "user" && type !== "assistant")
             return;
         if (obj.isMeta === true)
@@ -151,10 +243,7 @@ class RowBuilder {
         const message = obj.message;
         if (!message)
             return;
-        if (typeof obj.cwd === "string" && obj.cwd && !this.update.cwd)
-            this.update.cwd = obj.cwd;
-        if (typeof obj.gitBranch === "string" && obj.gitBranch && !this.update.branch)
-            this.update.branch = obj.gitBranch;
+        this.noteContext(obj);
         const ts = parseTimestamp(obj.timestamp);
         const extracted = extractContent(message.content);
         const limits = CONFIG.limits;
@@ -197,6 +286,16 @@ class RowBuilder {
         row.dirty = true;
         this.noteTime(ts);
     }
+    /**
+     * Lines were skipped because another session holds them (a fork's copied history): the
+     * open row is closed, so a line after the gap starts a row of its own instead of joining
+     * one from before it.
+     */
+    detach() {
+        if (this.pending)
+            this.finished.push(this.pending);
+        this.pending = null;
+    }
     /** Rows to write for this batch (finished ones plus the open one), then reset. */
     drain() {
         const rows = [...this.finished];
@@ -206,18 +305,26 @@ class RowBuilder {
         return rows.filter((r) => r.dirty);
     }
 }
-function isMessageLine(line) {
-    if (line.length < BIG_LINE)
-        return true;
-    const head = line.subarray(0, 2048).toString("utf8");
-    return head.includes('"type":"user"') || head.includes('"type":"assistant"');
-}
 function prepare(db) {
     return {
         file: db.prepare("SELECT * FROM files WHERE path = ?"),
-        session: db.prepare("SELECT sid, legacy, first_prompt FROM sessions WHERE id = ?"),
-        insertSession: db.prepare(`INSERT INTO sessions(id, project, source, is_subagent, parent_session, title)
-       VALUES (@id, @project, @source, @isSubagent, @parent, @title) ON CONFLICT(id) DO NOTHING`),
+        otherFile: db.prepare(`SELECT 1 FROM files f JOIN sessions s ON s.sid = f.session_sid WHERE s.id = ? AND f.path <> ?`),
+        session: db.prepare("SELECT sid, legacy, first_prompt, cwd, project, index_rev, context_copied FROM sessions WHERE id = ?"),
+        rev: db.prepare("SELECT index_rev FROM sessions WHERE sid = ?").pluck(),
+        uuidOwner: db.prepare("SELECT session_sid FROM line_uuids WHERE uuid = ?").pluck(),
+        insertUuid: db.prepare("INSERT INTO line_uuids(uuid, session_sid) VALUES (?, ?) ON CONFLICT(uuid) DO NOTHING"),
+        deleteUuids: db.prepare("DELETE FROM line_uuids WHERE session_sid = ?"),
+        cutoff: db.prepare("SELECT ts FROM line_uuid_cutoffs WHERE session_sid = ?").pluck(),
+        deleteCutoff: db.prepare("DELETE FROM line_uuid_cutoffs WHERE session_sid = ?"),
+        otherOffset: db.prepare("SELECT max(offset) FROM files WHERE session_sid = ? AND path <> ?").pluck(),
+        latestOtherFile: db.prepare("SELECT * FROM files WHERE session_sid = ? AND path <> ? ORDER BY indexed_at DESC, path LIMIT 1"),
+        shareTail: db.prepare(`UPDATE files SET tail_rowid = @tailRowid, tail_msg_id = @tailMsgId, pending_tools = @pendingTools
+       WHERE session_sid = @sid AND path <> @path`),
+        rereadOtherFiles: db.prepare(`UPDATE files SET size = 0, mtime = 0, offset = 0, head = '', tail_rowid = NULL, tail_msg_id = NULL, pending_tools = ''
+       WHERE session_sid = ? AND path <> ?`),
+        insertSession: db.prepare(`INSERT INTO sessions(id, project, source, is_subagent, parent_session, title, host)
+       VALUES (@id, @project, @source, @isSubagent, @parent, @title, @host) ON CONFLICT(id) DO NOTHING`),
+        setProject: db.prepare("UPDATE sessions SET project = ? WHERE sid = ? AND project = ?"),
         maxSeq: db.prepare("SELECT max(seq) AS seq FROM messages WHERE session_sid = ?"),
         tailRow: db.prepare(`SELECT m.id, m.seq, m.role, m.ts, m.tools, t.prose, t.tool_input, t.tool_output
        FROM messages m JOIN message_text t ON t.id = m.id WHERE m.id = ?`),
@@ -230,10 +337,32 @@ function prepare(db) {
          start_time = CASE WHEN @minTs IS NOT NULL AND (start_time IS NULL OR start_time > @minTs) THEN @minTs ELSE start_time END,
          end_time = CASE WHEN @maxTs IS NOT NULL AND (end_time IS NULL OR end_time < @maxTs) THEN @maxTs ELSE end_time END,
          message_count = message_count + @added,
-         cwd = coalesce(cwd, @cwd),
-         git_branch = coalesce(git_branch, @branch),
+         -- Set once, from the session's own lines. Values from copied lines (context_copied bits
+         -- 1 cwd, 2 branch, 4 remote) only fill a gap, and the session's own value replaces them.
+         -- The SET expressions all read the row as it was before this update.
+         cwd = CASE WHEN @cwd IS NOT NULL AND (cwd IS NULL OR context_copied & 1) THEN @cwd
+                    WHEN cwd IS NULL THEN @copiedCwd ELSE cwd END,
+         git_branch = CASE WHEN @branch IS NOT NULL AND (git_branch IS NULL OR context_copied & 2) THEN @branch
+                           WHEN git_branch IS NULL THEN @copiedBranch ELSE git_branch END,
+         git_remote = CASE WHEN @gitRemote IS NOT NULL AND (git_remote IS NULL OR context_copied & 4) THEN @gitRemote
+                           WHEN git_remote IS NULL THEN @copiedGitRemote ELSE git_remote END,
+         -- Git evidence at whichever cwd is in use.
+         cwd_git = CASE WHEN @cwd IS NOT NULL AND (cwd IS NULL OR context_copied & 1) THEN @cwdGit
+                        WHEN cwd IS NULL AND @copiedCwd IS NOT NULL THEN @copiedCwdGit
+                        WHEN context_copied & 1 AND @copiedCwd = cwd THEN max(cwd_git, @copiedCwdGit)
+                        ELSE max(cwd_git, @cwdGit) END,
+         context_copied =
+           (CASE WHEN @cwd IS NOT NULL AND (cwd IS NULL OR context_copied & 1) THEN 0
+                 WHEN cwd IS NULL AND @copiedCwd IS NOT NULL THEN 1 ELSE context_copied & 1 END) |
+           (CASE WHEN @branch IS NOT NULL AND (git_branch IS NULL OR context_copied & 2) THEN 0
+                 WHEN git_branch IS NULL AND @copiedBranch IS NOT NULL THEN 2 ELSE context_copied & 2 END) |
+           (CASE WHEN @gitRemote IS NOT NULL AND (git_remote IS NULL OR context_copied & 4) THEN 0
+                 WHEN git_remote IS NULL AND @copiedGitRemote IS NOT NULL THEN 4 ELSE context_copied & 4 END),
+         -- A session keeps the host it was first indexed from; only an unknown one is filled.
+         host = CASE WHEN host = '' THEN @host ELSE host END,
          first_prompt = coalesce(first_prompt, @firstPrompt),
-         title = coalesce(@customTitle, title, @aiTitle)
+         title = coalesce(@customTitle, title, @aiTitle),
+         index_rev = index_rev + 1
        WHERE sid = @sid`),
         upsertFile: db.prepare(`INSERT INTO files(path, session_sid, size, mtime, ino, head, offset, tail_rowid, tail_msg_id, pending_tools, indexed_at)
        VALUES (@path, @sid, @size, @mtime, @ino, @head, @offset, @tailRowid, @tailMsgId, @pendingTools, @now)
@@ -243,8 +372,15 @@ function prepare(db) {
          pending_tools = excluded.pending_tools, indexed_at = excluded.indexed_at`),
         touchFile: db.prepare("UPDATE files SET size = ?, mtime = ? WHERE path = ?"),
         deleteMessages: db.prepare("DELETE FROM messages WHERE session_sid = ?"),
-        resetSession: db.prepare(`UPDATE sessions SET start_time = NULL, end_time = NULL, message_count = 0, first_prompt = NULL, legacy = 0
+        resetSession: db.prepare(`UPDATE sessions SET start_time = NULL, end_time = NULL, message_count = 0, first_prompt = NULL, legacy = 0,
+         index_rev = index_rev + 1
        WHERE sid = ?`),
+        repoIdent: db.prepare("SELECT host, cwd, git_remote, cwd_git, repo FROM sessions WHERE sid = ?"),
+        gitCwdSeen: db.prepare("SELECT 1 FROM sessions WHERE host = ? AND cwd = ? AND sid != ? AND cwd_git = 1 LIMIT 1"),
+        flagNewDir: db.prepare("INSERT INTO meta(key, value) VALUES (?, '1') ON CONFLICT(key) DO UPDATE SET value = excluded.value"),
+        setRepo: db.prepare("UPDATE sessions SET repo = ?, repo_root = ? WHERE sid = ?"),
+        resolveRepo: repoResolver(db),
+        implicitKey: implicitRepoKey(db),
     };
 }
 const statementCache = new WeakMap();
@@ -260,7 +396,7 @@ function statements(db) {
 export function hasChanged(file, row) {
     return !row || row.size !== file.size || row.mtime !== file.mtimeMs || row.ino !== file.ino;
 }
-function ensureSession(db, s, file) {
+function ensureSession(db, s, file, host) {
     const existing = s.session.get(file.sessionId);
     if (existing)
         return existing;
@@ -272,14 +408,20 @@ function ensureSession(db, s, file) {
             isSubagent: file.isSubagent ? 1 : 0,
             parent: file.parentSessionId ?? null,
             title: file.isSubagent ? subagentTitle(file) : null,
+            host,
         });
     }).immediate();
     return s.session.get(file.sessionId);
 }
+/** Paths already reported as skipped, so a sweep logs each once per process. */
+const loggedClaimed = new Set();
 export function indexFile(db, file, options = {}) {
     const s = statements(db);
     const batchBytes = options.batchBytes ?? DEFAULT_BATCH_BYTES;
-    const result = { status: "unchanged", reset: false, messagesAdded: 0, bytesRead: 0, complete: true };
+    const host = options.host ?? CONFIG.host;
+    const result = {
+        status: "unchanged", reset: false, messagesAdded: 0, bytesRead: 0, complete: true, duplicates: noDuplicates(),
+    };
     let fd;
     try {
         fd = openSync(file.path, "r");
@@ -288,9 +430,18 @@ export function indexFile(db, file, options = {}) {
         return { ...result, status: "missing" };
     }
     try {
-        const session = ensureSession(db, s, file);
+        const format = formatOf(file.format);
+        if (format.firstFileWins && !s.file.get(file.path) && s.otherFile.get(file.sessionId, file.path)) {
+            if (!loggedClaimed.has(file.path)) {
+                loggedClaimed.add(file.path);
+                console.error(`claude-history: skipping ${file.path}: session ${file.sessionId} is already indexed from another file`);
+            }
+            return result;
+        }
+        let session = ensureSession(db, s, file, host);
         result.sessionSid = session.sid;
         let row = s.file.get(file.path);
+        const keyed = format.uuidLines === true;
         const replaced = row !== undefined &&
             (row.ino !== file.ino || file.size < row.offset || !headMatches(fd, row.head));
         // A session imported from the old index whose transcript reappears: start it over.
@@ -303,6 +454,10 @@ export function indexFile(db, file, options = {}) {
                     return false;
                 s.deleteMessages.run(session.sid);
                 s.resetSession.run(session.sid);
+                // Its lines go with its messages, and every other file of the session is read again.
+                s.deleteUuids.run(session.sid);
+                s.deleteCutoff.run(session.sid);
+                s.rereadOtherFiles.run(session.sid, file.path);
                 s.upsertFile.run({
                     path: file.path, sid: session.sid, size: 0, mtime: 0, ino: file.ino, head: "", offset: 0,
                     tailRowid: null, tailMsgId: null, pendingTools: "", now: Date.now(),
@@ -312,86 +467,213 @@ export function indexFile(db, file, options = {}) {
             if (!ok)
                 return { ...result, status: "raced" };
             result.reset = true;
-            session.first_prompt = null;
-            row = s.file.get(file.path);
         }
+        const snap = db.transaction(() => {
+            const sessionNow = s.session.get(file.sessionId);
+            const own = s.file.get(file.path);
+            const state = own ?? (keyed ? s.latestOtherFile.get(sessionNow.sid, file.path) : undefined);
+            return {
+                session: sessionNow, row: own, state,
+                tail: state?.tail_rowid ? s.tailRow.get(state.tail_rowid) : undefined,
+                maxSeq: s.maxSeq.get(sessionNow.sid).seq,
+                cutoff: keyed ? (s.cutoff.get(sessionNow.sid) ?? null) : null,
+                otherOffset: keyed ? (s.otherOffset.get(sessionNow.sid, file.path) ?? 0) : 0,
+            };
+        })();
+        session = snap.session;
+        row = snap.row;
+        let rev = session.index_rev;
         let offset = row?.offset ?? 0;
         if (row && !result.reset && offset >= file.size) {
             if (row.size !== file.size || row.mtime !== file.mtimeMs)
                 s.touchFile.run(file.size, file.mtimeMs, file.path);
             return result;
         }
-        // Reopen the row this file last wrote, so its turn can keep growing.
+        // Reopen the row the session's stream last wrote, so its turn can keep growing.
         let pending = null;
-        if (row?.tail_rowid) {
-            const tail = s.tailRow.get(row.tail_rowid);
-            if (tail) {
-                pending = {
-                    rowid: tail.id, seq: tail.seq, role: tail.role, ts: tail.ts, msgId: row.tail_msg_id, prose: tail.prose,
-                    toolInput: tail.tool_input, toolOutput: tail.tool_output, tools: tail.tools ? tail.tools.split(" ") : [], dirty: false,
-                };
-            }
+        if (snap.tail && snap.state) {
+            const tail = snap.tail;
+            pending = {
+                rowid: tail.id, seq: tail.seq, role: tail.role, ts: tail.ts, msgId: snap.state.tail_msg_id, prose: tail.prose,
+                toolInput: tail.tool_input, toolOutput: tail.tool_output, tools: tail.tools ? tail.tools.split(" ") : [], dirty: false,
+            };
         }
-        const maxSeq = s.maxSeq.get(session.sid).seq;
-        const builder = new RowBuilder(pending, maxSeq === null ? 0 : maxSeq + 1, !!session.first_prompt, parsePendingTools(row?.pending_tools));
+        const builder = new RowBuilder(pending, snap.maxSeq === null ? 0 : snap.maxSeq + 1, !!session.first_prompt, parsePendingTools(snap.state?.pending_tools));
+        builder.sessionCwd = (session.context_copied & COPIED_CWD) !== 0 ? null : session.cwd;
+        const tr = format.translator(file, offset > 0);
         let head = row?.head ?? "";
+        // The session's cwd, as far as it is known; a project the path does not carry starts as
+        // UNKNOWN_PROJECT and is read from the cwd.
+        let sessionCwd = session.cwd;
+        let project = format.projectFromContent ? session.project : file.projectDir;
+        /** Keys this call took and has not committed yet (hex), and the batch's keys to record. */
+        const taken = new Set();
+        let newKeys = [];
+        const duplicates = noDuplicates();
+        /** False when a keyed line is already indexed (counted), else true; a new key is noted. */
+        const isNew = (line, at) => {
+            const key = lineKey(line);
+            if (!key)
+                return true;
+            const hex = key.toString("hex");
+            if (taken.has(hex)) {
+                duplicates.sameSession++;
+                return false;
+            }
+            const owner = s.uuidOwner.get(key);
+            if (owner !== undefined) {
+                if (owner === session.sid) {
+                    duplicates.sameSession++;
+                }
+                else {
+                    duplicates.otherSession++;
+                    builder.detach();
+                    builder.noteCopied(line);
+                }
+                return false;
+            }
+            taken.add(hex);
+            newKeys.push(key);
+            // Upgraded from v2: a line another file of this session has passed, no newer than what
+            // was indexed then, is already in its rows (without a uuid). Recorded now, not added.
+            if (snap.cutoff !== null && at < snap.otherOffset) {
+                const ts = parseTimestamp(line.timestamp);
+                if (ts !== null && ts <= snap.cutoff) {
+                    duplicates.beforeUpgrade++;
+                    return false;
+                }
+            }
+            return true;
+        };
         for (;;) {
             const batch = readLines(fd, offset, batchBytes);
             const end = batch.end;
             if (end === offset)
                 break;
-            for (const line of batch.lines) {
-                if (!isMessageLine(line))
-                    continue;
+            batch.lines.forEach((line, i) => {
+                if (line.length >= BIG_LINE && !format.isMessageLine(line.subarray(0, 2048).toString("utf8")))
+                    return;
                 let obj;
                 try {
                     obj = JSON.parse(line.toString("utf8"));
                 }
                 catch {
-                    continue; // a malformed line is skipped, never retried
+                    return; // a malformed line is skipped, never retried
                 }
-                builder.addLine(obj);
-            }
+                for (const l of tr.translate(obj, batch.starts[i])) {
+                    if (!keyed || isNew(l, batch.starts[i]))
+                        builder.addLine(l);
+                }
+            });
             const rows = builder.drain();
             const update = builder.update;
             builder.update = emptyUpdate();
+            sessionCwd ??= update.cwd ?? update.copiedCwd;
             if (head.length === 0 || Number(head.slice(0, head.indexOf(":"))) < Math.min(HEAD_BYTES, end)) {
                 head = headHash(fd, Math.min(HEAD_BYTES, end));
             }
             options.beforeCommit?.();
             const start = offset;
-            const committed = db.transaction(() => {
-                const current = s.file.get(file.path);
-                if ((current?.offset ?? 0) !== start || (current && current.ino !== file.ino))
-                    return false;
-                let added = 0;
-                for (const r of rows) {
-                    const text = { prose: r.prose, toolInput: r.toolInput, toolOutput: r.toolOutput };
-                    const tools = r.tools.join(" ");
-                    if (r.rowid !== undefined) {
-                        s.updateTools.run({ tools, rowid: r.rowid });
-                        s.updateText.run({ ...text, rowid: r.rowid });
+            // A cwd that encodes to nothing (the filesystem root) resolves nothing.
+            const fromCwd = format.projectFromContent && project === UNKNOWN_PROJECT && sessionCwd ? claudeProjectDir(sessionCwd) : "";
+            const resolved = fromCwd || project;
+            let committed;
+            try {
+                committed = db.transaction(() => {
+                    const current = s.file.get(file.path);
+                    if ((current?.offset ?? 0) !== start || (current && current.ino !== file.ino))
+                        return false;
+                    // Another file of this session (or a reset) moved its stream since this view was read.
+                    if (s.rev.get(session.sid) !== rev)
+                        return false;
+                    // A line another indexer recorded since it was looked up: drop the batch, read again.
+                    for (const key of newKeys)
+                        if (s.insertUuid.run(key, session.sid).changes === 0)
+                            throw RACED;
+                    if (resolved !== project)
+                        s.setProject.run(resolved, session.sid, UNKNOWN_PROJECT);
+                    let added = 0;
+                    for (const r of rows) {
+                        const text = { prose: r.prose, toolInput: r.toolInput, toolOutput: r.toolOutput };
+                        const tools = r.tools.join(" ");
+                        if (r.rowid !== undefined) {
+                            s.updateTools.run({ tools, rowid: r.rowid });
+                            s.updateText.run({ ...text, rowid: r.rowid });
+                        }
+                        else {
+                            r.rowid = Number(s.insertMessage.run({ tools, sid: session.sid, seq: r.seq, role: r.role, ts: r.ts }).lastInsertRowid);
+                            s.insertText.run({ ...text, rowid: r.rowid, scope: scopeOf(session.sid, r.role) });
+                            added++;
+                        }
+                        r.dirty = false;
                     }
-                    else {
-                        r.rowid = Number(s.insertMessage.run({ tools, sid: session.sid, seq: r.seq, role: r.role, ts: r.ts }).lastInsertRowid);
-                        s.insertText.run({ ...text, rowid: r.rowid, scope: scopeOf(session.sid, r.role) });
-                        added++;
+                    const hasGit = (i) => !!i && i.cwd_git === 1;
+                    const before = s.repoIdent.get(session.sid);
+                    // A remote's credentials never reach the database.
+                    s.updateSession.run({
+                        ...update, gitRemote: update.gitRemote ? stripRemoteCredentials(update.gitRemote) : null,
+                        copiedGitRemote: update.copiedGitRemote ? stripRemoteCredentials(update.copiedGitRemote) : null,
+                        added, host, sid: session.sid,
+                    });
+                    // Resolve on write: O(1) per file, covering sweep and query-time top-up alike. A session
+                    // that cannot resolve stays null until its own file is next read. Every lookup is
+                    // scoped by the host stored on the session (the first host wins), not this call's.
+                    const ident = s.repoIdent.get(session.sid);
+                    // The first git evidence at a directory on a host (a branch or remote on a line at the
+                    // cwd) may fold worktree sessions already resolved under it (<dir>/.worktrees/<n>
+                    // indexed before <dir> itself): it flags the next sweep's full pass. A session whose
+                    // unknown host was just filled brings its evidence to that host for the first time.
+                    const newAtCwd = (has) => !!ident.cwd && has(ident) && (!has(before) || before?.cwd !== ident.cwd || before?.host !== ident.host);
+                    if (newAtCwd(hasGit) && s.gitCwdSeen.get(ident.host, ident.cwd, session.sid) === undefined) {
+                        s.flagNewDir.run(REPO_NEW_DIR_KEY);
                     }
-                    r.dirty = false;
-                }
-                s.updateSession.run({ ...update, added, sid: session.sid });
-                const tail = builder.pending;
-                s.upsertFile.run({
-                    // Stopping early records the size reached, so the file still reads as changed.
-                    path: file.path, sid: session.sid, size: batch.eof ? file.size : end, mtime: file.mtimeMs, ino: file.ino, head, offset: end,
-                    tailRowid: tail?.rowid ?? null, tailMsgId: tail?.msgId ?? null,
-                    pendingTools: serializePendingTools(builder.calls), now: Date.now(),
-                });
-                result.messagesAdded += added;
-                return true;
-            }).immediate();
+                    // A first remote with git evidence at the cwd is an implicit map row there: when it
+                    // changes the key that directory's sessions take (sessions resolved before it took
+                    // the path, or their own remote seen at another directory), it flags the full pass too.
+                    else if (newAtCwd((i) => hasGit(i) && !!i?.git_remote) &&
+                        s.implicitKey(ident.host, ident.cwd, session.sid) !== s.implicitKey(ident.host, ident.cwd)) {
+                        s.flagNewDir.run(REPO_NEW_DIR_KEY);
+                    }
+                    // A session's own cwd or remote replaced one its copied lines gave, its unknown host
+                    // was filled, or git evidence at its cwd now ranks its remote above the map: resolve
+                    // it again.
+                    if (ident.repo !== null && before && ((before.cwd !== null && before.cwd !== ident.cwd) ||
+                        (before.git_remote !== null && before.git_remote !== ident.git_remote) || before.host !== ident.host ||
+                        (ident.git_remote !== null && before.cwd_git !== ident.cwd_git))) {
+                        s.setRepo.run(null, null, session.sid);
+                        ident.repo = null;
+                    }
+                    if (ident.repo === null && (ident.cwd || ident.git_remote)) {
+                        const repo = s.resolveRepo({ host: ident.host, cwd: ident.cwd, gitRemote: ident.git_remote, cwdGit: ident.cwd_git === 1 });
+                        if (repo)
+                            s.setRepo.run(repo.key, repo.root, session.sid);
+                    }
+                    const tail = builder.pending;
+                    const tailState = {
+                        tailRowid: tail?.rowid ?? null, tailMsgId: tail?.msgId ?? null, pendingTools: serializePendingTools(builder.calls),
+                    };
+                    s.upsertFile.run({
+                        // Stopping early records the size reached, so the file still reads as changed.
+                        path: file.path, sid: session.sid, size: batch.eof ? file.size : end, mtime: file.mtimeMs, ino: file.ino, head, offset: end,
+                        ...tailState, now: Date.now(),
+                    });
+                    if (keyed)
+                        s.shareTail.run({ ...tailState, sid: session.sid, path: file.path });
+                    result.messagesAdded += added;
+                    return true;
+                }).immediate();
+            }
+            catch (error) {
+                if (error !== RACED)
+                    throw error;
+                committed = false;
+            }
             if (!committed)
-                return { ...result, status: "raced" };
+                return { ...result, duplicates, status: "raced" };
+            rev++;
+            taken.clear();
+            newKeys = [];
+            project = resolved;
             result.status = "indexed";
             result.bytesRead += end - offset;
             offset = end;
@@ -402,6 +684,7 @@ export function indexFile(db, file, options = {}) {
                 break;
             }
         }
+        result.duplicates = duplicates;
         if (result.status === "unchanged" && row && (row.size !== file.size || row.mtime !== file.mtimeMs)) {
             s.touchFile.run(file.size, file.mtimeMs, file.path);
         }

@@ -4,6 +4,7 @@
 
 import { homedir } from "os";
 import { sep } from "path";
+import type { DB } from "../db/database.js";
 import { extractProjectName } from "../utils/path-encoder.js";
 import type { ContextMessage, SearchHit, SearchResponse } from "./search-engine.js";
 
@@ -34,13 +35,18 @@ export function projectName(project: string, cwd?: string | null): string {
   return cwd ? tildePath(cwd) : extractProjectName(project);
 }
 
+/** Distinct hosts among the sessions; sessions with an unknown (empty) host do not count. */
+export function hostCount(db: DB): number {
+  return db.prepare("SELECT count(DISTINCT host) FROM sessions WHERE host <> ''").pluck().get() as number;
+}
+
 function contextLine(label: string, m: ContextMessage | undefined): string | null {
   return m ? `   ${label} #${m.seq} ${m.role}: ${m.text}` : null;
 }
 
-export function formatHit(hit: SearchHit, index: number): string[] {
+export function formatHit(hit: SearchHit, index: number, showHost = false): string[] {
   const tags: string[] = [];
-  if (hit.source === "codex") tags.push("codex");
+  if (hit.source !== "claude") tags.push(hit.source);
   if (hit.isSubagent) tags.push(`subagent of ${hit.parentSession ?? "unknown session"}`);
   if (hit.legacy) tags.push("archived (old index)");
   if (hit.partial) tags.push("partial match");
@@ -49,7 +55,7 @@ export function formatHit(hit: SearchHit, index: number): string[] {
   const more = hit.otherHits > 0 ? ` · +${hit.otherHits} more hit${hit.otherHits === 1 ? "" : "s"} in session` : "";
 
   const lines = [
-    `${index}. ${projectName(hit.project, hit.cwd)} · ${formatDateTime(hit.ts)} · session ${hit.sessionId} · ${hit.role} #${hit.seq}${tools}${more}` +
+    `${index}. ${projectName(hit.project, hit.cwd)}${showHost ? ` @${hit.host || "unknown"}` : ""} · ${formatDateTime(hit.ts)} · session ${hit.sessionId} · ${hit.role} #${hit.seq}${tools}${more}` +
       (tags.length ? ` · ${tags.join(" · ")}` : ""),
   ];
   if (hit.title) lines.push(`   title: ${hit.title}`);
@@ -83,7 +89,7 @@ export function formatSearchResponse(response: SearchResponse, rawQuery: string,
   if (freshness) lines.push(freshness);
   lines.push("");
   response.hits.forEach((hit, i) => {
-    lines.push(...formatHit(hit, i + 1));
+    lines.push(...formatHit(hit, i + 1, response.showHost));
   });
   if (response.hits.length > 0) {
     lines.push("", "Open a hit with read_session(session_id, around=<#>).");
